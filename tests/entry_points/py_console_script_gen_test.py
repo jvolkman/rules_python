@@ -226,6 +226,27 @@ class RunTest(unittest.TestCase):
 
         self.assertTrue(got.startswith(shebang + "\n"))
 
+    def test_entry_points_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = pathlib.Path(tmpdir)
+            dist_info = tmpdir / "site-packages" / "foo-1.0.dist-info"
+            dist_info.mkdir(parents=True)
+            entry_points = dist_info / "entry_points.txt"
+            entry_points.write_text("[console_scripts]\nfoo = foo.bar:baz\n")
+            out = tmpdir / "foo.py"
+
+            run(
+                entry_points=tmpdir,
+                out=out,
+                console_script=None,
+                console_script_guess="foo",
+                shebang="",
+            )
+
+            got = out.read_text()
+
+        self.assertRegex(got, r"from foo\.bar import baz")
+
 
 if __name__ == "__main__":
     unittest.main()

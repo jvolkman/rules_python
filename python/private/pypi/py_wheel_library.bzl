@@ -1,0 +1,315 @@
+"""Rule for extracting and installing a Python wheel in a Bazel build action."""
+
+load("@bazel_skylib//lib:paths.bzl", "paths")
+load("//python/private:attr_builders.bzl", "attrb")
+load(
+    "//python/private:attributes.bzl",
+    "COMMON_ATTRS",
+    "PY_SRCS_ATTRS",
+    "PrecompileAttr",
+    "PrecompileInvalidationModeAttr",
+    "PrecompileSourceRetentionAttr",
+    "WINDOWS_CONSTRAINTS_ATTRS",
+)
+load("//python/private:builders.bzl", "builders")
+load(
+    "//python/private:common.bzl",
+    "actions_run",
+    "collect_cc_info",
+    "collect_runfiles",
+    "create_instrumented_files_info",
+    "create_output_group_info",
+    "create_py_info",
+    "is_windows_platform",
+    "runfiles_root_path",
+)
+load(
+    "//python/private:flags.bzl",
+    "CompilationMode",
+    "VenvsSitePackages",
+)
+load("//python/private:normalize_name.bzl", "normalize_name")
+load("//python/private:py_cc_link_params_info.bzl", "PyCcLinkParamsInfo")
+load("//python/private:py_info.bzl", "PyInfo")
+load("//python/private:py_interpreter_program.bzl", "PyInterpreterProgramInfo")
+load("//python/private:py_library.bzl", "LIBRARY_ATTRS")
+load("//python/private:reexports.bzl", "BuiltinPyInfo")
+load("//python/private:rule_builders.bzl", "ruleb")
+load(
+    "//python/private:toolchain_types.bzl",
+    "EXEC_TOOLS_TOOLCHAIN_TYPE",
+    "TARGET_TOOLCHAIN_TYPE",
+)
+load("//python/private:venv_runfiles.bzl", "get_venv_symlinks")
+load("//python/private:version.bzl", "version")
+
+PY_WHEEL_LIBRARY_ATTRS = COMMON_ATTRS | WINDOWS_CONSTRAINTS_ATTRS | {
+    "data_exclude": lambda: attrb.StringList(
+        default = [],
+        doc = """
+Glob patterns to exclude from non-.py files when extracting the wheel.
+""",
+    ),
+    "deps": PY_SRCS_ATTRS["deps"],
+    "enable_implicit_namespace_pkgs": lambda: attrb.Bool(
+        default = False,
+        doc = """
+If True, disables generating pkgutil-style __init__.py files for implicit
+namespace packages.
+""",
+    ),
+    "experimental_venvs_site_packages": LIBRARY_ATTRS["experimental_venvs_site_packages"],
+    "extracted_files": lambda: attrb.StringList(
+        default = [],
+        doc = "Relative paths under the installed wheel directory.",
+    ),
+    "namespace_package_files": lambda: attrb.StringList(
+        default = [],
+        doc = """
+Relative paths to pkgutil-style namespace package __init__.py files.
+""",
+    ),
+    "precompile": PY_SRCS_ATTRS["precompile"],
+    "precompile_invalidation_mode": PY_SRCS_ATTRS["precompile_invalidation_mode"],
+    "precompile_optimize_level": PY_SRCS_ATTRS["precompile_optimize_level"],
+    "precompile_source_retention": PY_SRCS_ATTRS["precompile_source_retention"],
+    "shebang_scripts": lambda: attrb.StringList(
+        default = [],
+        doc = """
+Top-level script names in .data/scripts/ whose #!python shebang is rewritten.
+""",
+    ),
+    "srcs_exclude": lambda: attrb.StringList(
+        default = [],
+        doc = "Glob patterns to exclude from .py files when extracting the wheel.",
+    ),
+    "wheel": lambda: attrb.Label(
+        allow_single_file = True,
+        mandatory = True,
+        doc = "The .whl file to extract and install.",
+    ),
+    "_action_whl_installer": lambda: attrb.Label(
+        cfg = "exec",
+        default = Label("//python/private/pypi:action_whl_installer"),
+    ),
+    "_precompile_flag": PY_SRCS_ATTRS["_precompile_flag"],
+    "_precompile_source_retention_flag": PY_SRCS_ATTRS["_precompile_source_retention_flag"],
+}
+
+def _has_pyi_files(extracted_files, keep_source = True):
+    for f in extracted_files:
+        if not f.startswith("site-packages/"):
+            continue
+        if f.endswith(".pyi"):
+            return True
+        if keep_source and (f == "site-packages/py.typed" or f.endswith("/py.typed")):
+            return True
+    return False
+
+def _should_precompile(ctx):
+    exec_tools_toolchain = ctx.toolchains[EXEC_TOOLS_TOOLCHAIN_TYPE]
+    if exec_tools_toolchain == None or exec_tools_toolchain.exec_tools.precompiler == None:
+        return False
+    target_toolchain = ctx.toolchains[TARGET_TOOLCHAIN_TYPE]
+    if target_toolchain == None or not getattr(target_toolchain, "py3_runtime", None):
+        return False
+    target_runtime = target_toolchain.py3_runtime
+    if not getattr(target_runtime, "pyc_tag", None) or not getattr(target_runtime, "interpreter_version_info", None):
+        return False
+    return PrecompileAttr.get_effective_value(ctx) == PrecompileAttr.ENABLED
+
+def _get_package_and_version(tags):
+    package = None
+    version_str = None
+    for tag in tags:
+        if tag.startswith("pypi_name="):
+            package = normalize_name(tag[len("pypi_name="):])
+        elif tag.startswith("pypi_version="):
+            version_str = version.normalize(tag[len("pypi_version="):])
+    return package, version_str
+
+def _py_wheel_library_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.attr.name)
+    is_windows = is_windows_platform(ctx)
+    venvs_site_packages_enabled = VenvsSitePackages.is_enabled(ctx)
+    create_namespace_inits = (
+        not ctx.attr.enable_implicit_namespace_pkgs and
+        not venvs_site_packages_enabled
+    )
+    should_precompile = _should_precompile(ctx)
+    source_retention = PrecompileSourceRetentionAttr.get_effective_value(ctx)
+    keep_source = (
+        not should_precompile or
+        source_retention == PrecompileSourceRetentionAttr.KEEP_SOURCE
+    )
+
+    args = ctx.actions.args()
+    args.add("--wheel", ctx.file.wheel.path)
+    args.add("--directory", out.path)
+    args.add("--target-os", "windows" if is_windows else "unix")
+    for pattern in ctx.attr.srcs_exclude:
+        args.add("--srcs-exclude-glob", pattern)
+    for pattern in ctx.attr.data_exclude:
+        args.add("--data-exclude-glob", pattern)
+    if create_namespace_inits:
+        args.add("--create-namespace-inits")
+
+    extra_tools = []
+    if should_precompile:
+        target_runtime = ctx.toolchains[TARGET_TOOLCHAIN_TYPE].py3_runtime
+        version_info = target_runtime.interpreter_version_info
+        python_version = "{}.{}".format(version_info.major, version_info.minor)
+        invalidation_mode = ctx.attr.precompile_invalidation_mode
+        if invalidation_mode == PrecompileInvalidationModeAttr.AUTO:
+            if ctx.var.get("COMPILATION_MODE") == CompilationMode.OPT:
+                invalidation_mode = PrecompileInvalidationModeAttr.UNCHECKED_HASH
+            else:
+                invalidation_mode = PrecompileInvalidationModeAttr.CHECKED_HASH
+        args.add("--precompile")
+        args.add("--pyc-tag", target_runtime.pyc_tag)
+        args.add("--precompile-invalidation-mode", invalidation_mode)
+        args.add("--precompile-optimize-level", str(ctx.attr.precompile_optimize_level))
+        args.add("--precompile-source-retention", source_retention)
+        args.add("--python-version", python_version)
+        args.add("--src-name-prefix", out.short_path)
+        precompiler = ctx.toolchains[EXEC_TOOLS_TOOLCHAIN_TYPE].exec_tools.precompiler
+
+        # When the precompiler provides PyInterpreterProgramInfo (the default stock
+        # precompiler), action_whl_installer compiles in-process using the exec_tools
+        # interpreter directly.
+        if PyInterpreterProgramInfo not in precompiler:
+            files_to_run = precompiler[DefaultInfo].files_to_run
+            if not files_to_run or not files_to_run.executable:
+                fail(("Unrecognized precompiler: target '{}' does not provide " +
+                      "PyInterpreterProgramInfo nor appears to be executable").format(
+                    precompiler,
+                ))
+            args.add("--precompiler-tool", files_to_run.executable.path)
+            extra_tools.append(files_to_run)
+
+    actions_run(
+        ctx,
+        executable = ctx.attr._action_whl_installer,
+        arguments = [args],
+        inputs = [ctx.file.wheel],
+        outputs = [out],
+        tools = extra_tools,
+        mnemonic = "PyWheelInstall",
+        progress_message = "Installing wheel {} into %{{output}}".format(ctx.file.wheel.basename),
+    )
+
+    out_rf_path = runfiles_root_path(ctx, out.short_path)
+    site_packages_rf_path = paths.join(out_rf_path, "site-packages")
+    out_files_depset = depset([out])
+
+    if venvs_site_packages_enabled:
+        imports = depset()
+        package, version_str = _get_package_and_version(ctx.attr.tags)
+        pyc_tag = (
+            ctx.toolchains[TARGET_TOOLCHAIN_TYPE].py3_runtime.pyc_tag if should_precompile else ""
+        )
+        tree_files = []
+        for f in ctx.attr.extracted_files:
+            if f.startswith("site-packages/") and f.endswith(".py"):
+                if not keep_source:
+                    tree_files.append(f[:-len(".py")] + ".pyc")
+                else:
+                    tree_files.append(f)
+                    if should_precompile and pyc_tag:
+                        stem = paths.basename(f)[:-len(".py")]
+                        tree_files.append(
+                            "{}/__pycache__/{}.{}.pyc".format(
+                                paths.dirname(f),
+                                stem,
+                                pyc_tag,
+                            ),
+                        )
+            else:
+                tree_files.append(f)
+        for s in ctx.attr.shebang_scripts:
+            tree_files.append("bin/" + ((s + ".bat") if is_windows else s))
+        venv_symlinks = list(get_venv_symlinks(
+            ctx,
+            tree_files,
+            package,
+            version_str,
+            site_packages_root = "site-packages",
+            namespace_package_files = ctx.attr.namespace_package_files,
+            tree_artifact = out,
+        ))
+        extra_data_files = [f for f in ctx.files.data if not f.is_directory]
+        if extra_data_files:
+            site_packages_root = paths.normalize(paths.join(
+                ctx.label.package,
+                "site-packages",
+            ))
+            venv_symlinks.extend(get_venv_symlinks(
+                ctx,
+                extra_data_files,
+                package,
+                version_str,
+                site_packages_root = site_packages_root,
+            ))
+    else:
+        imports = depset([site_packages_rf_path])
+        venv_symlinks = []
+
+    runfiles = builders.RunfilesBuilder()
+    runfiles.add([out])
+    runfiles.add(collect_runfiles(ctx))
+    runfiles = runfiles.build(ctx)
+
+    cc_info = collect_cc_info(ctx)
+    py_info, builtins_py_info = create_py_info(
+        ctx,
+        original_sources = [out],
+        required_py_files = [out] if keep_source else [],
+        required_pyc_files = [out] if should_precompile else [],
+        implicit_pyc_files = [],
+        implicit_pyc_source_files = [],
+        imports = imports,
+        venv_symlinks = venv_symlinks,
+        pyi_files = [out] if _has_pyi_files(ctx.attr.extracted_files, keep_source = keep_source) else [],
+        srcs_version = "ALL",
+        pyi_deps = [],
+    )
+
+    providers = [
+        DefaultInfo(files = out_files_depset, runfiles = runfiles),
+        py_info,
+        create_instrumented_files_info(ctx, source_attributes = []),
+        PyCcLinkParamsInfo(cc_info = cc_info),
+        create_output_group_info(py_info.transitive_sources, extra_groups = {}),
+    ]
+    if builtins_py_info:
+        providers.append(builtins_py_info)
+    return providers
+
+_MaybeBuiltinPyInfo = [BuiltinPyInfo] if BuiltinPyInfo != None else []
+
+py_wheel_library = ruleb.Rule(
+    implementation = _py_wheel_library_impl,
+    doc = """
+Extracts and installs a Python wheel into a directory artifact during the build
+phase.
+
+Note: Precompilation is performed inside the wheel installation action based on
+the effective `precompile` setting (`--precompile` and `precompile`). A
+downstream binary that explicitly overrides `pyc_collection` (rather than
+inheriting from `--precompile`) does not change whether `.pyc` files are
+included in the installed wheel directory. When `precompile_source_retention` is
+`omit_source`, `.py` source files are removed from the installed wheel
+`TreeArtifact` (and `PyInfo.direct_original_sources` / `transitive_original_sources`
+reference that sourceless directory, so static analysis and coverage tools will
+not see `.py` sources for the wheel). When `.pyi` stubs or `py.typed` markers
+are present, `PyInfo.direct_pyi_files` / `transitive_pyi_files` contains the
+installed wheel `TreeArtifact` directory; consumers must handle directory
+`File`s.
+""",
+    attrs = PY_WHEEL_LIBRARY_ATTRS,
+    provides = [PyCcLinkParamsInfo, PyInfo] + _MaybeBuiltinPyInfo,
+    toolchains = [
+        ruleb.ToolchainType(TARGET_TOOLCHAIN_TYPE, mandatory = False),
+        ruleb.ToolchainType(EXEC_TOOLS_TOOLCHAIN_TYPE, mandatory = True),
+    ],
+).build()

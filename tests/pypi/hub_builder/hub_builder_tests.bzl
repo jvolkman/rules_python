@@ -1677,6 +1677,72 @@ Attempting to create a duplicate library pypi_315_foo for foo with different arg
 
 _tests.append(_test_err_duplicate_repos)
 
+def _test_experimental_action_install_precedence(env):
+    # When pip.parse sets experimental_action_install = True, RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL=0
+    # in the environment must override it back to False.
+    builder_disabled = hub_builder(env)
+    builder_disabled.pip_parse(
+        _mock_mctx(
+            os_name = "osx",
+            arch_name = "aarch64",
+            environ = {"RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL": "0"},
+            mock_files = {
+                "requirements.txt": "simple==0.0.1 @ https://example.org/simple-0.0.1-py3-none-any.whl --hash=sha256:deadbeef",
+            },
+        ),
+        _parse(
+            hub_name = "pypi",
+            python_version = "3.15",
+            experimental_action_install = True,
+            requirements_lock = "requirements.txt",
+        ),
+    )
+    pypi_disabled = builder_disabled.build()
+    pypi_disabled.whl_libraries().contains_exactly({
+        "pypi_315_simple_py3_none_any_deadbeef": {
+            "config_load": "@pypi//:config.bzl",
+            "dep_template": "@pypi//{name}:{target}",
+            "filename": "simple-0.0.1-py3-none-any.whl",
+            "integrity": "sha256-3q2+7w==",
+            "requirement": "simple==0.0.1",
+            "urls": ["https://example.org/simple-0.0.1-py3-none-any.whl"],
+        },
+    })
+
+    # When experimental_action_install is True (via pip.parse without env override),
+    # python_interpreter_target is forwarded even for direct wheel URLs.
+    builder_enabled = hub_builder(env)
+    builder_enabled.pip_parse(
+        _mock_mctx(
+            os_name = "osx",
+            arch_name = "aarch64",
+            mock_files = {
+                "requirements.txt": "simple==0.0.1 @ https://example.org/simple-0.0.1-py3-none-any.whl --hash=sha256:deadbeef",
+            },
+        ),
+        _parse(
+            hub_name = "pypi",
+            python_version = "3.15",
+            experimental_action_install = True,
+            requirements_lock = "requirements.txt",
+        ),
+    )
+    pypi_enabled = builder_enabled.build()
+    pypi_enabled.whl_libraries().contains_exactly({
+        "pypi_315_simple_py3_none_any_deadbeef": {
+            "config_load": "@pypi//:config.bzl",
+            "dep_template": "@pypi//{name}:{target}",
+            "experimental_action_install": True,
+            "filename": "simple-0.0.1-py3-none-any.whl",
+            "integrity": "sha256-3q2+7w==",
+            "python_interpreter_target": "unit_test_interpreter_target",
+            "requirement": "simple==0.0.1",
+            "urls": ["https://example.org/simple-0.0.1-py3-none-any.whl"],
+        },
+    })
+
+_tests.append(_test_experimental_action_install_precedence)
+
 def hub_builder_test_suite(name):
     """Create the test suite.
 

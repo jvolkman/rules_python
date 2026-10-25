@@ -231,6 +231,22 @@ tasks:
     name: "Default: Ubuntu, Bazel {bazel}"
     platform: ubuntu2204
     bazel: ${{ bazel }}
+  ubuntu_action_install:
+    <<: *reusable_config
+    name: "Action install: Ubuntu"
+    platform: ubuntu2204
+    build_flags:
+      <<: *reusable_config_build_flags
+      ? "--repo_env=RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL=1"
+      # pyrefly aspect does not yet support TreeArtifact directory sources
+      ? "--output_groups=-pyrefly"
+    test_flags:
+      <<: *reusable_config_test_flags
+      ? "--repo_env=RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL=1"
+      # pyrefly aspect does not yet support TreeArtifact directory sources
+      ? "--output_groups=-pyrefly"
+    shell_commands:
+      - "bazel test --config=ci --repo_env=RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL=1 --output_groups=-pyrefly --//python/config_settings:venvs_site_packages=yes //tests/pypi/... //tests/venv_site_packages_libs/... //tests/implicit_namespace_packages/... //tests/whl_with_build_files/..."
   ubuntu_upcoming:
     <<: *reusable_config
     name: "Default: Ubuntu, upcoming Bazel"

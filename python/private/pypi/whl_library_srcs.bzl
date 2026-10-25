@@ -12,6 +12,7 @@ load(
     "WHEEL_FILE",
 )
 load(":namespace_pkgs.bzl", _create_inits = "create_inits")
+load(":py_wheel_library.bzl", "py_wheel_library")
 load(":venv_entry_point.bzl", "venv_entry_point")
 load(":venv_rewrite_shebang.bzl", "venv_rewrite_shebang")
 
@@ -23,6 +24,11 @@ _BAZEL_REPO_FILE_GLOBS = [
     "WORKSPACE",
     "WORKSPACE.bzlmod",
     "WORKSPACE.bazel",
+]
+
+DEFAULT_DATA_EXCLUDE = [
+    "**/*.pyc",
+    "**/*.pyc.*",  # During pyc creation, temp files named *.pyc.NNNN are created
 ]
 
 _IS_VENV_SITE_PACKAGES_YES = Label("//python/config_settings:_is_venvs_site_packages_yes")
@@ -43,10 +49,15 @@ def whl_library_srcs(
         native = native,
         enable_implicit_namespace_pkgs = False,
         namespace_package_files = [],
+        action_install = False,
+        extracted_files = [],
+        shebang_scripts = [],
         visibility = ["//visibility:public"],
+        _fail = fail,
         rules = struct(
             copy_file = copy_file,
             py_library = py_library,
+            py_wheel_library = py_wheel_library,
             venv_entry_point = venv_entry_point,
             venv_rewrite_shebang = venv_rewrite_shebang,
             gen_wheel_record = gen_wheel_record,
@@ -77,13 +88,25 @@ def whl_library_srcs(
             files for namespace pkgs.
         namespace_package_files: {type}`list[str]` A list of labels of files whose
             directories are namespace packages.
+        action_install: {type}`bool` Whether to install the wheel in a build action.
+        extracted_files: {type}`list[str]` Relative paths under the installed wheel directory.
+        shebang_scripts: {type}`list[str]` Top-level script names in `.data/scripts/` with `#!python` shebangs.
         native: {type}`native` The native struct for overriding in tests.
+        _fail: {type}`callable` The fail function for overriding in tests.
         rules: {type}`struct` A struct with references to rules for creating targets.
     """
     tags = sorted(tags)
     data = [] + data
-
     bins_for_data_label = []
+
+    if action_install and filegroups != None:
+        _fail(
+            (
+                "In '{}', custom glob-based 'filegroups' ({}) are not supported with experimental_action_install " +
+                "because wheel contents are extracted into the ':srcs' TreeArtifact during the build phase."
+            ).format(name, ", ".join(sorted(filegroups.keys()))),
+        )
+        return
 
     for ep_dict in entry_points.values():
         kwargs = dict(ep_dict)
@@ -95,6 +118,61 @@ def whl_library_srcs(
         )
         bins_for_data_label.append(ep_target_name)
         data.append(ep_target_name)
+
+    for src, dest in copy_files.items():
+        rules.copy_file(
+            name = dest + ".copy",
+            src = src,
+            out = dest,
+            visibility = visibility,
+        )
+        data.append(dest)
+    for src, dest in copy_executables.items():
+        rules.copy_file(
+            name = dest + ".copy",
+            src = src,
+            out = dest,
+            is_executable = True,
+            visibility = visibility,
+        )
+        data.append(dest)
+
+    if hasattr(native, "filegroup"):
+        native.filegroup(
+            name = WHEEL_FILE,
+            srcs = [name],
+            visibility = visibility,
+        )
+
+    if action_install:
+        if hasattr(native, "filegroup"):
+            for fg_name, fg_srcs in [
+                (EXTRACTED_WHEEL_FILES, [PY_SRCS_LABEL]),
+                (DIST_INFO_LABEL, [PY_SRCS_LABEL]),
+                (DATA_LABEL, [PY_SRCS_LABEL] + bins_for_data_label),
+            ]:
+                native.filegroup(
+                    name = fg_name,
+                    srcs = fg_srcs,
+                    visibility = visibility,
+                )
+
+        if hasattr(rules, "py_wheel_library"):
+            rules.py_wheel_library(
+                name = PY_SRCS_LABEL,
+                wheel = name,
+                extracted_files = extracted_files,
+                shebang_scripts = shebang_scripts,
+                namespace_package_files = namespace_package_files,
+                srcs_exclude = srcs_exclude,
+                data_exclude = data_exclude,
+                enable_implicit_namespace_pkgs = enable_implicit_namespace_pkgs,
+                data = data,
+                tags = tags,
+                visibility = visibility,
+                experimental_venvs_site_packages = _VENV_SITE_PACKAGES_FLAG,
+            )
+        return
 
     existing_bin_names = {ep["name"].lower(): None for ep in entry_points.values()}
     for p in native.glob(["bin/*"], allow_empty = True):
@@ -157,31 +235,6 @@ def whl_library_srcs(
             visibility = visibility,
         )
 
-    for src, dest in copy_files.items():
-        rules.copy_file(
-            name = dest + ".copy",
-            src = src,
-            out = dest,
-            visibility = visibility,
-        )
-        data.append(dest)
-    for src, dest in copy_executables.items():
-        rules.copy_file(
-            name = dest + ".copy",
-            src = src,
-            out = dest,
-            is_executable = True,
-            visibility = visibility,
-        )
-        data.append(dest)
-
-    if hasattr(native, "filegroup"):
-        native.filegroup(
-            name = WHEEL_FILE,
-            srcs = [name],
-            visibility = visibility,
-        )
-
     if hasattr(rules, "py_library"):
         srcs = native.glob(
             ["site-packages/**/*.py"],
@@ -194,11 +247,7 @@ def whl_library_srcs(
         # NOTE: pyi files should probably be excluded because they're carried
         # by the pyi_srcs attribute. However, historical behavior included
         # them in data and some tools currently rely on that.
-        _data_exclude = [
-            "**/*.py",
-            "**/*.pyc",
-            "**/*.pyc.*",  # During pyc creation, temp files named *.pyc.NNNN are created
-        ]
+        _data_exclude = ["**/*.py"] + DEFAULT_DATA_EXCLUDE
         if sdist_filename:
             _data_exclude.append("**/*.dist-info/RECORD")
         for item in data_exclude:

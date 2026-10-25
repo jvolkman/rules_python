@@ -18,6 +18,7 @@ load("@bazel_skylib//lib:sets.bzl", "sets")
 load("//python/private:normalize_name.bzl", "normalize_name")
 load("//python/private:repo_utils.bzl", "REPO_DEBUG_ENV_VAR", "repo_utils")
 load("//python/private:text_util.bzl", "render")
+load(":attrs.bzl", "use_action_install")
 load(":parse_requirements.bzl", "host_platform", "parse_requirements", "select_requirement")
 load(":pep508_env.bzl", "env")
 load(":pip_repository_attrs.bzl", "ATTRS")
@@ -211,6 +212,9 @@ def _pip_repository_impl(rctx):
     if rctx.attr.python_interpreter_target:
         config["python_interpreter_target"] = str(rctx.attr.python_interpreter_target)
 
+    if use_action_install(rctx, rctx.attr):
+        config["experimental_action_install"] = True
+
     macro_tmpl = "@%s//{}:{}" % rctx.attr.name
 
     aliases = render_pkg_aliases(
@@ -373,6 +377,7 @@ See the example in rules_python/examples/pip_parse_vendored.
 """,
     implementation = _pip_repository_impl,
     environ = [
+        "RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL",
         "RULES_PYTHON_PIP_ISOLATED",
         REPO_DEBUG_ENV_VAR,
     ],

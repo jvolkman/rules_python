@@ -26,13 +26,18 @@ https://github.com/bazelbuild/bazel/issues/14744
 _ENTRY_POINTS_TXT = "entry_points.txt"
 
 def _get_entry_points_txt(entry_points_txt):
-    """Get the entry_points.txt file
+    """Get the entry_points.txt file or TreeArtifact directory containing it.
 
     TODO: use map_each to avoid flattening of the directories outside the execution phase.
     """
+    dirs = []
     for file in entry_points_txt.files.to_list():
         if file.basename == _ENTRY_POINTS_TXT:
             return file
+        if file.is_directory:
+            dirs.append(file)
+    if len(dirs) == 1:
+        return dirs[0]
 
     fail("{} does not contain {}".format(entry_points_txt, _ENTRY_POINTS_TXT))
 
@@ -43,7 +48,10 @@ def _py_console_script_gen_impl(ctx):
     args.add("--console-script", ctx.attr.console_script)
     args.add("--console-script-guess", ctx.attr.console_script_guess)
     args.add("--shebang", ctx.attr.shebang)
-    args.add(entry_points_txt)
+
+    # Use `.path` when `entry_points_txt` is a TreeArtifact directory (under
+    # `experimental_action_install`), as `Args#add` rejects directory File objects.
+    args.add(entry_points_txt.path if entry_points_txt.is_directory else entry_points_txt)
     args.add(ctx.outputs.out)
 
     ctx.actions.run(

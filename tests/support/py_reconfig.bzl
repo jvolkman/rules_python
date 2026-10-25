@@ -47,6 +47,8 @@ def _perform_transition_impl(input_settings, attr, base_impl):
         settings[labels.VENVS_USE_DECLARE_SYMLINK] = attr.venvs_use_declare_symlink
     if attr.venvs_site_packages:
         settings[labels.VENVS_SITE_PACKAGES] = attr.venvs_site_packages
+    if attr.precompile_flag:
+        settings[labels.PRECOMPILE] = attr.precompile_flag
     return settings
 
 _BUILTIN_BUILD_PYTHON_ZIP = [] if config.bazel_10_or_later else [
@@ -59,6 +61,7 @@ _RECONFIG_INPUTS = [
     "//command_line_option:stamp",
     CUSTOM_RUNTIME,
     labels.BOOTSTRAP_IMPL,
+    labels.PRECOMPILE,
     labels.PYTHON_SRC,
     labels.REPL_DEP,
     labels.VENVS_SITE_PACKAGES,
@@ -83,6 +86,7 @@ to make the RBE presubmits happy, which disable auto-detection of a CC
 toolchain.
 """,
     ),
+    "precompile_flag": attrb.String(),
     "python_src": attrb.Label(),
     "repl_dep": attrb.Label(),
     "venvs_site_packages": attrb.String(),

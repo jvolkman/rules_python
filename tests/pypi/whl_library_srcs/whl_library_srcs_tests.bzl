@@ -245,6 +245,112 @@ def _test_exclude_bazel_files(env):
 
 _tests.append(_test_exclude_bazel_files)
 
+def _test_action_install(env):
+    filegroup_calls = []
+    copy_calls = []
+    entry_point_calls = []
+    py_wheel_library_calls = []
+
+    whl_library_srcs(
+        name = "foo-1.0-py3-none-any.whl",
+        action_install = True,
+        sdist_filename = "foo-1.0.tar.gz",
+        extracted_files = [
+            "bin/bin_tool",
+            "data/etc/cfg.txt",
+            "include/foo/foo.h",
+            "site-packages/foo-1.0.dist-info/METADATA",
+            "site-packages/foo/__init__.py",
+        ],
+        namespace_package_files = ["site-packages/foo/__init__.py"],
+        shebang_scripts = ["shebang_tool"],
+        srcs_exclude = ["foo/exclude.py"],
+        data_exclude = ["foo/exclude.dat"],
+        copy_files = {"file_src": "file_dest"},
+        copy_executables = {"exec_src": "exec_dest"},
+        entry_points = {
+            "ep_cli": {
+                "group": "console_scripts",
+                "module": "foo.cli",
+                "name": "ep_cli",
+                "object": "main",
+            },
+        },
+        tags = ["pypi_name=foo", "pypi_version=1.0"],
+        native = struct(
+            filegroup = lambda **kwargs: filegroup_calls.append(kwargs),
+            glob = lambda *args, **kwargs: env.fail("glob should not be called when action_install=True"),
+        ),
+        rules = struct(
+            copy_file = lambda **kwargs: copy_calls.append(kwargs),
+            venv_entry_point = lambda **kwargs: entry_point_calls.append(kwargs),
+            py_wheel_library = lambda **kwargs: py_wheel_library_calls.append(kwargs),
+        ),
+    )
+
+    env.expect.that_int(len(entry_point_calls)).equals(1)
+    env.expect.that_int(len(copy_calls)).equals(2)
+    env.expect.that_collection(filegroup_calls).contains_exactly([
+        {
+            "name": "whl_file",
+            "srcs": ["foo-1.0-py3-none-any.whl"],
+            "visibility": ["//visibility:public"],
+        },
+        {
+            "name": "extracted_whl_files",
+            "srcs": ["srcs"],
+            "visibility": ["//visibility:public"],
+        },
+        {
+            "name": "dist_info",
+            "srcs": ["srcs"],
+            "visibility": ["//visibility:public"],
+        },
+        {
+            "name": "data",
+            "srcs": ["srcs", "bin/ep_cli"],
+            "visibility": ["//visibility:public"],
+        },
+    ])
+    env.expect.that_int(len(py_wheel_library_calls)).equals(1)
+    call = py_wheel_library_calls[0]
+    env.expect.that_str(call["name"]).equals("srcs")
+    env.expect.that_str(call["wheel"]).equals("foo-1.0-py3-none-any.whl")
+    env.expect.that_collection(call["extracted_files"]).contains_exactly([
+        "bin/bin_tool",
+        "data/etc/cfg.txt",
+        "include/foo/foo.h",
+        "site-packages/foo-1.0.dist-info/METADATA",
+        "site-packages/foo/__init__.py",
+    ])
+    env.expect.that_collection(call["namespace_package_files"]).contains_exactly([
+        "site-packages/foo/__init__.py",
+    ])
+    env.expect.that_collection(call["shebang_scripts"]).contains_exactly(["shebang_tool"])
+    env.expect.that_collection(call["srcs_exclude"]).contains_exactly(["foo/exclude.py"])
+    env.expect.that_collection(call["data_exclude"]).contains_exactly(["foo/exclude.dat"])
+    env.expect.that_collection(call["data"]).contains_exactly([
+        "bin/ep_cli",
+        "file_dest",
+        "exec_dest",
+    ])
+
+_tests.append(_test_action_install)
+
+def _test_action_install_fails_on_custom_filegroups(env):
+    errors = []
+    whl_library_srcs(
+        name = "foo-1.0-py3-none-any.whl",
+        action_install = True,
+        filegroups = {"custom_fg": {"include": ["site-packages/**"]}},
+        _fail = errors.append,
+    )
+    env.expect.that_int(len(errors)).equals(1)
+    env.expect.that_str(errors[0]).contains("custom glob-based 'filegroups'")
+    env.expect.that_str(errors[0]).contains("custom_fg")
+
+_tests.append(_test_action_install_fails_on_custom_filegroups)
+
 def whl_library_srcs_test_suite(name):
     """create the test suite.
 

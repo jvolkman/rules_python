@@ -64,6 +64,27 @@ here do not cause packages to be re-fetched. Don't fetch different things based
 on the value of these variables.
 """,
     ),
+    "experimental_action_install": attr.bool(
+        default = False,
+        doc = """\
+If True, wheel extraction and installation are deferred to a Bazel build action (`py_wheel_library`)
+producing a directory artifact (`TreeArtifact`) rather than extracting wheel contents during the
+repository phase. Alternatively, the {envvar}`RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL` environment
+variable can be used to control this flag.
+
+Note: In this mode:
+- Aspects that inspect `PyInfo.direct_original_sources` or `srcs` receive the installed wheel
+  `TreeArtifact` directory rather than individual `.py` source files.
+- The `:dist_info`, `:data`, and `:extracted_whl_files` targets alias the installed wheel
+  `TreeArtifact` directory rather than separate `filegroup` subsets.
+- A registered Python exec-tools toolchain (`//python:exec_tools_toolchain_type`) is required, and
+  `whl_library` repositories require a fetch-time Python interpreter (`python_interpreter` or
+  `python_interpreter_target`) to inspect `.whl` zip archives.
+- In `pip.whl_mods`, `filegroups` is not supported, `copy_files` / `copy_executables` source keys
+  must be external labels (starting with `@` or `//`), and `additive_build_content` cannot glob or
+  directly reference extracted wheel paths (`site-packages/`, `include/`, `data/`).
+""",
+    ),
     "extra_pip_args": attr.string_list(
         doc = """Extra arguments to pass on to pip. Must not contain spaces.
 
@@ -142,3 +163,18 @@ def use_isolated(ctx, attr):
             use_isolated = True
 
     return use_isolated
+
+def use_action_install(ctx, attr = None):
+    """Determine whether to extract wheels in a build action instead of repository phase.
+
+    Args:
+        ctx: repository or module context
+        attr: optional attributes for the repo rule or tag extension
+
+    Returns:
+        True if build-action wheel installation should be used
+    """
+    env_val = ctx.getenv("RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL", None)
+    if env_val != None:
+        return env_val.lower() not in ("0", "false", "")
+    return bool(attr.experimental_action_install) if attr else False

@@ -269,6 +269,179 @@ whl_library_deps_targets(
 
 _tests.append(_test_deps_targets)
 
+def _test_action_install(env):
+    want = """\
+load("@package_metadata//rules:package_metadata.bzl", "package_metadata")
+load("@rules_python//python/private/pypi:whl_library_targets.bzl", "whl_library_targets")
+
+package(default_visibility = ["//visibility:public"])
+
+whl_library_targets(
+    action_install = True,
+    dep_template = "@pypi//{name}:{target}",
+    extracted_files = [
+        "bin/bar",
+        "data/etc/d.txt",
+        "include/foo.h",
+        "site-packages/foo-0.dist-info/METADATA",
+        "site-packages/foo/__init__.py",
+    ],
+    metadata_name = "foo",
+    name = "foo.whl",
+    namespace_package_files = ["site-packages/foo/__init__.py"],
+    shebang_scripts = ["baz"],
+    tags = [
+        "pypi_name=foo",
+        "pypi_version=0",
+    ],
+)
+"""
+    actual = generate_whl_library_build_bazel(
+        metadata_version = "0",
+        metadata_name = "foo",
+        dep_template = "@pypi//{name}:{target}",
+        name = "foo.whl",
+        config_load = "@pypi//:config.bzl",
+        action_install = True,
+        extracted_files = [
+            "bin/bar",
+            "data/etc/d.txt",
+            "include/foo.h",
+            "site-packages/foo-0.dist-info/METADATA",
+            "site-packages/foo/__init__.py",
+        ],
+        namespace_package_files = ["site-packages/foo/__init__.py"],
+        shebang_scripts = ["baz"],
+    )
+    env.expect.that_str(actual.replace("@@", "@")).equals(want)
+
+_tests.append(_test_action_install)
+
+def _test_action_install_glob_warning(env):
+    warnings = []
+    logger = struct(
+        warn = warnings.append,
+    )
+    generate_whl_library_build_bazel(
+        metadata_version = "0",
+        metadata_name = "foo",
+        dep_template = "@pypi//{name}:{target}",
+        name = "foo.whl",
+        config_load = "@pypi//:config.bzl",
+        action_install = True,
+        extracted_files = ["site-packages/foo/__init__.py"],
+        annotation = struct(
+            copy_files = {},
+            copy_executables = {},
+            data = [],
+            data_exclude_glob = [],
+            srcs_exclude_glob = [],
+            additive_build_content = 'filegroup(name = "hdrs", srcs = glob(["site-packages/**/*.h"]))',
+        ),
+        logger = logger,
+    )
+    env.expect.that_int(len(warnings)).equals(1)
+    env.expect.that_str(warnings[0]).contains("may glob wheel contents; globs match nothing under experimental_action_install")
+    env.expect.that_str(warnings[0]).contains("wheel_glob()")
+    env.expect.that_str(warnings[0]).contains("py_wheel_headers")
+    env.expect.that_str(warnings[0]).contains("py_wheel_transform")
+    env.expect.that_str(warnings[0]).contains("post_install_patches")
+    env.expect.that_str(warnings[0]).contains("py_wheel_extract_files")
+
+    # Also triggers when additive_build_content contains "load(".
+    load_warnings = []
+    generate_whl_library_build_bazel(
+        metadata_version = "0",
+        metadata_name = "foo",
+        dep_template = "@pypi//{name}:{target}",
+        name = "foo.whl",
+        config_load = "@pypi//:config.bzl",
+        action_install = True,
+        extracted_files = ["site-packages/foo/__init__.py"],
+        annotation = struct(
+            copy_files = {},
+            copy_executables = {},
+            data = [],
+            data_exclude_glob = [],
+            srcs_exclude_glob = [],
+            additive_build_content = 'load("//bazel:pip_parse_targets.bzl", "define_targets")\ndefine_targets()',
+        ),
+        logger = struct(warn = load_warnings.append),
+    )
+    env.expect.that_int(len(load_warnings)).equals(1)
+    env.expect.that_str(load_warnings[0]).contains("wheel_glob()")
+
+    # Classic mode (action_install = False) does not warn.
+    classic_warnings = []
+    generate_whl_library_build_bazel(
+        metadata_version = "0",
+        metadata_name = "foo",
+        dep_template = "@pypi//{name}:{target}",
+        name = "foo.whl",
+        config_load = "@pypi//:config.bzl",
+        annotation = struct(
+            copy_files = {},
+            copy_executables = {},
+            data = [],
+            data_exclude_glob = [],
+            srcs_exclude_glob = [],
+            additive_build_content = 'filegroup(name = "hdrs", srcs = glob(["site-packages/**/*.h"]))',
+        ),
+        logger = struct(warn = classic_warnings.append),
+    )
+    env.expect.that_int(len(classic_warnings)).equals(0)
+
+    # Safe loads (@rules_cc, @rules_python) and comments mentioning glob( do not warn.
+    safe_warnings = []
+    generate_whl_library_build_bazel(
+        metadata_version = "0",
+        metadata_name = "foo",
+        dep_template = "@pypi//{name}:{target}",
+        name = "foo.whl",
+        config_load = "@pypi//:config.bzl",
+        action_install = True,
+        extracted_files = ["site-packages/foo/__init__.py"],
+        annotation = struct(
+            copy_files = {},
+            copy_executables = {},
+            data = [],
+            data_exclude_glob = [],
+            srcs_exclude_glob = [],
+            additive_build_content = (
+                '# never use glob(["*.h"]) here\n' +
+                'load("@rules_cc//cc:defs.bzl", "cc_import")\n' +
+                'load("@rules_python//python:pip.bzl", "wheel_glob")\n' +
+                'filegroup(name = "hdrs", srcs = wheel_glob(["site-packages/**/*.h"]))'
+            ),
+        ),
+        logger = struct(warn = safe_warnings.append),
+    )
+    env.expect.that_int(len(safe_warnings)).equals(0)
+
+    # Spaced "glob (" still warns.
+    spaced_warnings = []
+    generate_whl_library_build_bazel(
+        metadata_version = "0",
+        metadata_name = "foo",
+        dep_template = "@pypi//{name}:{target}",
+        name = "foo.whl",
+        config_load = "@pypi//:config.bzl",
+        action_install = True,
+        extracted_files = ["site-packages/foo/__init__.py"],
+        annotation = struct(
+            copy_files = {},
+            copy_executables = {},
+            data = [],
+            data_exclude_glob = [],
+            srcs_exclude_glob = [],
+            additive_build_content = 'filegroup(name = "hdrs", srcs = glob (["site-packages/**/*.h"]))',
+        ),
+        logger = struct(warn = spaced_warnings.append),
+    )
+    env.expect.that_int(len(spaced_warnings)).equals(1)
+
+_tests.append(_test_action_install_glob_warning)
+
 def generate_whl_library_build_bazel_test_suite(name):
     """Create the test suite.
 
