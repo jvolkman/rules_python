@@ -256,6 +256,7 @@ def install_wheel(
     patch_strip: int = 0,
     expected_site_paths: list[str] | None = None,
     validation_source: str = "extracted_files",
+    dist_info_dir_override: str = "",
     precompile: bool = False,
     pyc_tag: str = "",
     precompile_invalidation_mode: str = "checked_hash",
@@ -312,18 +313,24 @@ def install_wheel(
         used_data_dir = False
 
         with zipfile.ZipFile(wheel_path) as z:
-            dist_info_dir, _, entry_points_content = (
+            wheel_dist_info_dir, _, entry_points_content = (
                 find_wheel_dist_info_and_entry_points(z)
             )
-            expected_data_dir = expected_data_dir_for_dist_info(dist_info_dir)
+            expected_data_dir = expected_data_dir_for_dist_info(wheel_dist_info_dir)
             data_dir_prefix = f"{expected_data_dir}/" if expected_data_dir else ""
+            dist_info_dir = (
+                dist_info_dir_override
+                if (dist_info_dir_override and wheel_dist_info_dir)
+                else wheel_dist_info_dir
+            )
 
             for info, dest_or_script, is_shebang in plan_wheel_entries(
                 z,
-                dist_info_dir,
+                wheel_dist_info_dir,
                 entry_points_content,
                 srcs_exclude_rx,
                 data_exclude_rx,
+                target_dist_info_dir=dist_info_dir,
             ):
                 if data_dir_prefix and info.filename.startswith(data_dir_prefix):
                     used_data_dir = True
@@ -360,12 +367,17 @@ def install_wheel(
                     INSTALLER_URL, encoding="utf-8"
                 )
             record_path = dist_info_path / "RECORD"
-            if used_data_dir and expected_data_dir and record_path.is_file():
+            renamed_dist_info = dist_info_dir != wheel_dist_info_dir
+            if (
+                (used_data_dir and expected_data_dir) or renamed_dist_info
+            ) and record_path.is_file():
                 lines = rewrite_record_lines(
                     record_path.read_text(encoding="utf-8").splitlines(),
                     target_os,
-                    expected_data_dir,
+                    expected_data_dir if used_data_dir else "",
                     rewritten_scripts,
+                    wheel_dist_info_dir=wheel_dist_info_dir,
+                    target_dist_info_dir=dist_info_dir,
                 )
                 record_path.write_text("".join(lines), encoding="utf-8", newline="\n")
 
@@ -545,6 +557,10 @@ def main() -> None:
         default=[],
     )
     parser.add_argument(
+        "--dist-info-dir",
+        default="",
+    )
+    parser.add_argument(
         "--precompile",
         action="store_true",
         default=False,
@@ -597,6 +613,7 @@ def main() -> None:
             args.expected_site_paths if args.validate_site_packages else None
         ),
         validation_source=args.validation_source,
+        dist_info_dir_override=args.dist_info_dir,
         precompile=args.precompile,
         pyc_tag=args.pyc_tag,
         precompile_invalidation_mode=args.precompile_invalidation_mode,

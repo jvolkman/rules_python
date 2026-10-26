@@ -740,6 +740,57 @@ class WheelLayoutAndInstallerTest(unittest.TestCase):
                     [("site-packages/fgpkg/missing.txt", root / "extracted/m.txt")],
                 )
 
+    def test_site_paths_validation_and_dist_info_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            whl = _write_zip(
+                tmp_path / "Google.Pkg-1.0-py3-none-any.whl",
+                {
+                    "Google.Pkg-1.0.dist-info/METADATA": "Name: Google.Pkg\nVersion: 1.0\n",
+                    "Google.Pkg-1.0.dist-info/WHEEL": "Wheel-Version: 1.0\nTag: py3-none-any\n",
+                    "Google.Pkg-1.0.dist-info/RECORD": (
+                        "Google.Pkg-1.0.dist-info/METADATA,sha256=abc,10\n"
+                        "google/protobuf/__init__.py,sha256=def,6\n"
+                    ),
+                    "google/protobuf/__init__.py": "X = 1\n",
+                    "google/_upb/__init__.py": "Y = 2\n",
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "uncovered"):
+                action_whl_installer.install_wheel(
+                    wheel_path=whl,
+                    dest_dir=tmp_path / "out_empty",
+                    expected_site_paths=[],
+                )
+            with self.assertRaisesRegex(ValueError, "google/_upb/__init__.py"):
+                action_whl_installer.install_wheel(
+                    wheel_path=whl,
+                    dest_dir=tmp_path / "out_uncovered",
+                    expected_site_paths=["google/protobuf"],
+                )
+            with self.assertRaisesRegex(ValueError, "_missing_helper.py"):
+                action_whl_installer.install_wheel(
+                    wheel_path=whl,
+                    dest_dir=tmp_path / "out_missing",
+                    expected_site_paths=[
+                        "google/protobuf",
+                        "google/_upb",
+                        "_missing_helper.py",
+                    ],
+                )
+            out_ok = tmp_path / "out_ok"
+            action_whl_installer.install_wheel(
+                wheel_path=whl,
+                dest_dir=out_ok,
+                expected_site_paths=["google/protobuf", "google/_upb"],
+                dist_info_dir_override="google_pkg-1.0.dist-info",
+            )
+            record = (
+                out_ok / "site-packages/google_pkg-1.0.dist-info/RECORD"
+            ).read_text(encoding="utf-8")
+            self.assertIn("google_pkg-1.0.dist-info/METADATA,sha256=abc,10\n", record)
+            self.assertNotIn("Google.Pkg-1.0.dist-info/", record)
+
 
 if __name__ == "__main__":
     unittest.main()

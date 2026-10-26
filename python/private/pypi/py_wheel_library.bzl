@@ -30,7 +30,12 @@ load(
 )
 load("//python/private:normalize_name.bzl", "normalize_name")
 load("//python/private:py_cc_link_params_info.bzl", "PyCcLinkParamsInfo")
-load("//python/private:py_info.bzl", "PyInfo")
+load(
+    "//python/private:py_info.bzl",
+    "PyInfo",
+    "VenvSymlinkEntry",
+    "VenvSymlinkKind",
+)
 load("//python/private:py_interpreter_program.bzl", "PyInterpreterProgramInfo")
 load("//python/private:py_library.bzl", "LIBRARY_ATTRS")
 load("//python/private:reexports.bzl", "BuiltinPyInfo")
@@ -42,7 +47,9 @@ load(
 )
 load("//python/private:venv_runfiles.bzl", "get_venv_symlinks")
 load("//python/private:version.bzl", "version")
+load(":parse_whl_name.bzl", "parse_whl_name")
 load(":py_installed_wheel_info.bzl", "PyInstalledWheelInfo")
+load(":py_sdist_wheel.bzl", "PyBuiltWheelInfo")
 
 PY_WHEEL_LIBRARY_ATTRS = COMMON_ATTRS | WINDOWS_CONSTRAINTS_ATTRS | {
     "data_exclude": lambda: attrb.StringList(
@@ -52,6 +59,10 @@ Glob patterns to exclude from non-.py files when extracting the wheel.
 """,
     ),
     "deps": PY_SRCS_ATTRS["deps"],
+    "distribution": lambda: attrb.String(
+        default = "",
+        doc = "Optional Python distribution name; overrides `PyBuiltWheelInfo.distribution` and `pypi_name=` tag.",
+    ),
     "enable_implicit_namespace_pkgs": lambda: attrb.Bool(
         default = False,
         doc = """
@@ -96,9 +107,20 @@ prefixes) require `post_install_patch_strip = 1`.
 Top-level script names in .data/scripts/ whose #!python shebang is rewritten.
 """,
     ),
+    "site_paths": lambda: attrb.StringList(
+        default = [],
+        doc = """
+Top-level or leaf paths under `site-packages/` when `extracted_files` is not
+populated (e.g. for action-built sdists). Only used when `venvs_site_packages=yes`.
+""",
+    ),
     "srcs_exclude": lambda: attrb.StringList(
         default = [],
         doc = "Glob patterns to exclude from .py files when extracting the wheel.",
+    ),
+    "version": lambda: attrb.String(
+        default = "",
+        doc = "Optional PEP 440 package version; overrides `PyBuiltWheelInfo.version` and `pypi_version=` tag.",
     ),
     "wheel": lambda: attrb.Label(
         allow_single_file = True,
@@ -155,6 +177,75 @@ def _expected_site_paths_from_extracted(extracted_files):
             seen[top] = True
     return seen.keys()
 
+def _expand_py_entry(path, keep_source, should_precompile, pyc_tag):
+    if not keep_source:
+        return [path[:-len(".py")] + ".pyc"]
+    if not (should_precompile and pyc_tag):
+        return [path]
+    stem = paths.basename(path)[:-len(".py")]
+    dirname = paths.dirname(path)
+    pyc_rel = (
+        "{}/__pycache__/{}.{}.pyc".format(dirname, stem, pyc_tag) if dirname else "__pycache__/{}.{}.pyc".format(stem, pyc_tag)
+    )
+    return [path, pyc_rel]
+
+def _resolve_meta_value(explicit_val, built_val, tag_val, whl_val, use_site_paths):
+    if explicit_val:
+        return explicit_val
+    if built_val:
+        return built_val
+    if use_site_paths:
+        return whl_val
+    return tag_val or whl_val
+
+def _venv_symlinks_for_site_paths(
+        ctx,
+        out_files,
+        out_rf_path,
+        site_packages_rf_path,
+        package,
+        version_str,
+        dist_info_dir,
+        is_windows,
+        keep_source,
+        should_precompile = False,
+        pyc_tag = ""):
+    symlinks = []
+    seen = {}
+    entries = []
+    for sp in list(ctx.attr.site_paths) + list(ctx.attr.namespace_package_files):
+        if sp.endswith(".py"):
+            entries.extend(_expand_py_entry(sp, keep_source, should_precompile, pyc_tag))
+        else:
+            entries.append(sp)
+    if dist_info_dir:
+        entries.append(dist_info_dir)
+    for sp in entries:
+        if not sp or sp in seen:
+            continue
+        seen[sp] = True
+        symlinks.append(VenvSymlinkEntry(
+            kind = VenvSymlinkKind.LIB,
+            link_to_path = paths.join(site_packages_rf_path, sp),
+            link_to_file = None,
+            package = package,
+            version = version_str,
+            venv_path = sp,
+            files = out_files,
+        ))
+    for s in ctx.attr.shebang_scripts:
+        script_name = (s + ".bat") if is_windows else s
+        symlinks.append(VenvSymlinkEntry(
+            kind = VenvSymlinkKind.BIN,
+            link_to_path = paths.join(out_rf_path, "bin", script_name),
+            link_to_file = None,
+            package = package,
+            version = version_str,
+            venv_path = script_name,
+            files = out_files,
+        ))
+    return symlinks
+
 def _py_wheel_library_impl(ctx):
     is_windows = is_windows_platform(ctx)
     venvs_site_packages_enabled = VenvsSitePackages.is_enabled(ctx)
@@ -167,6 +258,43 @@ def _py_wheel_library_impl(ctx):
     keep_source = (
         not should_precompile or
         source_retention == PrecompileSourceRetentionAttr.KEEP_SOURCE
+    )
+
+    built_info = (
+        ctx.attr.wheel[PyBuiltWheelInfo] if PyBuiltWheelInfo in ctx.attr.wheel else None
+    )
+    tag_package, tag_version = _get_package_and_version(ctx.attr.tags)
+    whl_package = None
+    whl_version = None
+    if built_info == None and ctx.file.wheel.basename.endswith(".whl") and ctx.file.wheel.basename.count("-") >= 4:
+        parsed_whl = parse_whl_name(ctx.file.wheel.basename)
+        whl_package = normalize_name(parsed_whl.distribution)
+        parsed_ver = version.parse(parsed_whl.version, strict = False)
+        whl_version = parsed_ver.string if parsed_ver else None
+
+    use_site_paths = bool(ctx.attr.site_paths) or not ctx.attr.extracted_files
+    package = _resolve_meta_value(
+        normalize_name(ctx.attr.distribution) if ctx.attr.distribution else None,
+        built_info.distribution if built_info else None,
+        tag_package,
+        whl_package,
+        use_site_paths,
+    )
+    version_str = _resolve_meta_value(
+        version.normalize(ctx.attr.version) if ctx.attr.version else None,
+        built_info.version if built_info else None,
+        tag_version,
+        whl_version,
+        use_site_paths,
+    )
+    if (ctx.attr.site_paths or (venvs_site_packages_enabled and use_site_paths)) and (not package or not version_str):
+        fail(
+            "py_wheel_library requires distribution and version (via PyBuiltWheelInfo " +
+            "or the distribution and version attributes) when site_paths is used or " +
+            "extracted_files is empty in venvs_site_packages mode",
+        )
+    dist_info_dir = (
+        "{}-{}.dist-info".format(package, version_str) if use_site_paths and package and version_str else ""
     )
 
     installed_info = (
@@ -210,6 +338,7 @@ def _py_wheel_library_impl(ctx):
         underlying_wheel = installed_info.wheel
     else:
         out = ctx.actions.declare_directory(ctx.attr.name)
+        wheel_input = built_info.directory if built_info != None else ctx.file.wheel
         args = ctx.actions.args()
         if installed_info != None and installed_info.wheel == None:
             if not installed_info.keep_source and (keep_source or ctx.files.post_install_patches):
@@ -223,13 +352,15 @@ def _py_wheel_library_impl(ctx):
             underlying_wheel = None
         else:
             install_source_file = (
-                installed_info.wheel if installed_info != None else ctx.file.wheel
+                installed_info.wheel if installed_info != None else wheel_input
             )
             args.add("--wheel", install_source_file.path)
             underlying_wheel = None if ctx.files.post_install_patches else install_source_file
 
         args.add("--directory", out.path)
         args.add("--target-os", "windows" if is_windows else "unix")
+        if dist_info_dir:
+            args.add("--dist-info-dir", dist_info_dir)
         for pattern in effective_srcs_exclude:
             args.add("--srcs-exclude-glob", pattern)
         for pattern in effective_data_exclude:
@@ -242,7 +373,11 @@ def _py_wheel_library_impl(ctx):
                 args.add("--patch", patch_file.path)
         if venvs_site_packages_enabled:
             args.add("--validate-site-packages")
-            for sp in _expected_site_paths_from_extracted(ctx.attr.extracted_files):
+            args.add("--validation-source", "site_paths" if use_site_paths else "extracted_files")
+            expected_paths = (
+                ctx.attr.site_paths + ctx.attr.namespace_package_files if use_site_paths else _expected_site_paths_from_extracted(ctx.attr.extracted_files)
+            )
+            for sp in expected_paths:
                 args.add("--expected-site-path", sp)
 
         extra_tools = []
@@ -285,39 +420,41 @@ def _py_wheel_library_impl(ctx):
 
     if venvs_site_packages_enabled:
         imports = depset()
-        package, version_str = _get_package_and_version(ctx.attr.tags)
         pyc_tag = (
             ctx.toolchains[TARGET_TOOLCHAIN_TYPE].py3_runtime.pyc_tag if should_precompile else ""
         )
-        tree_files = []
-        for f in ctx.attr.extracted_files:
-            if f.startswith("site-packages/") and f.endswith(".py"):
-                if not keep_source:
-                    tree_files.append(f[:-len(".py")] + ".pyc")
+        if ctx.attr.extracted_files:
+            tree_files = []
+            for f in ctx.attr.extracted_files:
+                if f.startswith("site-packages/") and f.endswith(".py"):
+                    tree_files.extend(_expand_py_entry(f, keep_source, should_precompile, pyc_tag))
                 else:
                     tree_files.append(f)
-                    if should_precompile and pyc_tag:
-                        stem = paths.basename(f)[:-len(".py")]
-                        tree_files.append(
-                            "{}/__pycache__/{}.{}.pyc".format(
-                                paths.dirname(f),
-                                stem,
-                                pyc_tag,
-                            ),
-                        )
-            else:
-                tree_files.append(f)
-        for s in ctx.attr.shebang_scripts:
-            tree_files.append("bin/" + ((s + ".bat") if is_windows else s))
-        venv_symlinks = list(get_venv_symlinks(
-            ctx,
-            tree_files,
-            package,
-            version_str,
-            site_packages_root = "site-packages",
-            namespace_package_files = ctx.attr.namespace_package_files,
-            tree_artifact = out,
-        ))
+            for s in ctx.attr.shebang_scripts:
+                tree_files.append("bin/" + ((s + ".bat") if is_windows else s))
+            venv_symlinks = list(get_venv_symlinks(
+                ctx,
+                tree_files,
+                package,
+                version_str,
+                site_packages_root = "site-packages",
+                namespace_package_files = ctx.attr.namespace_package_files,
+                tree_artifact = out,
+            ))
+        else:
+            venv_symlinks = _venv_symlinks_for_site_paths(
+                ctx,
+                out_files_depset,
+                out_rf_path,
+                site_packages_rf_path,
+                package,
+                version_str,
+                dist_info_dir,
+                is_windows,
+                keep_source,
+                should_precompile = should_precompile,
+                pyc_tag = pyc_tag,
+            )
         extra_data_files = [f for f in ctx.files.data if not f.is_directory]
         if extra_data_files:
             site_packages_root = paths.normalize(paths.join(
@@ -341,6 +478,13 @@ def _py_wheel_library_impl(ctx):
     runfiles = runfiles.build(ctx)
 
     cc_info = collect_cc_info(ctx)
+    has_pyi = (
+        _has_pyi_files(ctx.attr.extracted_files, keep_source = keep_source) or
+        _has_pyi_files(
+            ["site-packages/" + sp.strip("/") for sp in ctx.attr.site_paths if sp.strip("/")],
+            keep_source = keep_source,
+        )
+    )
     py_info, builtins_py_info = create_py_info(
         ctx,
         original_sources = [out],
@@ -350,7 +494,7 @@ def _py_wheel_library_impl(ctx):
         implicit_pyc_source_files = [],
         imports = imports,
         venv_symlinks = venv_symlinks,
-        pyi_files = [out] if _has_pyi_files(ctx.attr.extracted_files, keep_source = keep_source) else [],
+        pyi_files = [out] if has_pyi else [],
         srcs_version = "ALL",
         pyi_deps = [],
     )
@@ -389,10 +533,13 @@ included in the installed wheel directory. When `precompile_source_retention` is
 `omit_source`, `.py` source files are removed from the installed wheel
 `TreeArtifact` (and `PyInfo.direct_original_sources` / `transitive_original_sources`
 reference that sourceless directory, so static analysis and coverage tools will
-not see `.py` sources for the wheel). When `.pyi` stubs or `py.typed` markers
-are present, `PyInfo.direct_pyi_files` / `transitive_pyi_files` contains the
-installed wheel `TreeArtifact` directory; consumers must handle directory
-`File`s.
+not see `.py` sources for the wheel). When `.pyi` stubs or `py.typed` markers are present in `extracted_files` (or
+explicitly listed in `site_paths` for action-built sdists),
+`PyInfo.direct_pyi_files` / `transitive_pyi_files` contains the installed wheel
+`TreeArtifact` directory; consumers must handle directory `File`s. For
+action-built sdists whose `site_paths` only list package directory names,
+`pyi_files` is empty unless `.pyi` or `py.typed` paths are included in
+`site_paths`.
 """,
     attrs = PY_WHEEL_LIBRARY_ATTRS,
     provides = [PyCcLinkParamsInfo, PyInfo, PyInstalledWheelInfo] + _MaybeBuiltinPyInfo,
