@@ -24,6 +24,7 @@ _RENDER = {
     "entry_points": render.dict_dict,
     "extracted_files": render.list,
     "extras": render.list,
+    "filegroups": render.dict,
     "group_deps": render.list,
     "include": str,
     "namespace_package_files": render.list,
@@ -155,6 +156,8 @@ def generate_whl_library_build_bazel(
         kwargs["copy_executables"] = annotation.copy_executables
         kwargs["data_exclude"] = kwargs.get("data_exclude", []) + annotation.data_exclude_glob
         kwargs["srcs_exclude"] = annotation.srcs_exclude_glob
+        if getattr(annotation, "filegroups", None) and "filegroups" not in kwargs:
+            kwargs["filegroups"] = annotation.filegroups
         if annotation.additive_build_content:
             if (
                 kwargs.get("action_install") and
@@ -168,6 +171,20 @@ def generate_whl_library_build_bazel(
                         "py_wheel_headers, py_wheel_transform, post_install_patches, or " +
                         "py_wheel_extract_files instead."
                     ).format(kwargs.get("name", kwargs.get("metadata_name", ""))),
+                )
+            if (
+                "wheel_glob(" in annotation.additive_build_content or
+                "wheel_glob (" in annotation.additive_build_content
+            ):
+                loads.append(
+                    """load("@rules_python//python/private/pypi:py_wheel_extract_files.bzl", "wheel_glob")""",
+                )
+            if (
+                "wheel_extract_prefix(" in annotation.additive_build_content or
+                "wheel_extract_prefix (" in annotation.additive_build_content
+            ):
+                loads.append(
+                    """load("@rules_python//python/private/pypi:py_wheel_extract_files.bzl", "wheel_extract_prefix")""",
                 )
             additional_content.append(annotation.additive_build_content)
 
@@ -186,3 +203,34 @@ def generate_whl_library_build_bazel(
 
     # NOTE: Ensure that we terminate with a new line
     return contents.rstrip() + "\n"
+
+def generate_wheel_files_bzl(extracted_files):
+    """Generate the contents of `wheel_files.bzl` for a wheel repository."""
+    return """\
+\"\"\"Generated wheel file list and wheel_glob wrapper.\"\"\"
+
+load("@rules_python//python/private/pypi:py_wheel_extract_files.bzl", _wheel_glob = "wheel_glob")  # buildifier: disable=bzl-visibility
+
+FILES = {files}
+
+def wheel_glob(
+        include,
+        exclude = [],
+        exclude_directories = 1,
+        allow_empty = True,
+        *,
+        wheel_library = Label("//:_wheel_install"),
+        is_executable = False):
+    \"\"\"Glob over wheel files in this repository.\"\"\"
+    return _wheel_glob(
+        include = include,
+        exclude = exclude,
+        exclude_directories = exclude_directories,
+        allow_empty = allow_empty,
+        files = FILES,
+        wheel_library = wheel_library,
+        is_executable = is_executable,
+    )
+""".format(
+        files = render.list(extracted_files),
+    )

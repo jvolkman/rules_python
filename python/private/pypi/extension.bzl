@@ -51,6 +51,7 @@ def _whl_mods_impl(whl_mods_dict):
                 data = mods.data,
                 data_exclude_glob = mods.data_exclude_glob,
                 srcs_exclude_glob = mods.srcs_exclude_glob,
+                **({"filegroups": mods.filegroups} if getattr(mods, "filegroups", None) else {})
             ))
 
         _whl_mods_repo(
@@ -323,6 +324,7 @@ You cannot use both the additive_build_content and additive_build_content_file a
                 copy_executables = whl_mod.copy_executables,
                 data = whl_mod.data,
                 data_exclude_glob = whl_mod.data_exclude_glob,
+                filegroups = whl_mod.filegroups,
                 srcs_exclude_glob = whl_mod.srcs_exclude_glob,
             )
 
@@ -1068,6 +1070,11 @@ the generated `py_library` target.""",
             doc = """\
 (list, optional): A list of exclude glob patterns to add as `data` to
 the generated `py_library` target.""",
+        ),
+        "filegroups": attr.string_list_dict(
+            doc = """\
+(dict, optional): A mapping of filegroup target names to lists of glob patterns
+relative to the installed wheel root (`site-packages/`, `data/`, `bin/`, `include/`).""",
         ),
         "hub_name": attr.string(
             doc = """\

@@ -20,6 +20,7 @@ def package_annotation(
         copy_executables = {},
         data = [],
         data_exclude_glob = [],
+        filegroups = {},
         srcs_exclude_glob = []):
     """Annotations to apply to the BUILD file content from package generated from a `pip_repository` rule.
 
@@ -34,6 +35,7 @@ def package_annotation(
         data (list, optional): A list of labels to add as `data` dependencies to the generated `py_library` target.
         data_exclude_glob (list, optional): A list of exclude glob patterns to add as `data` to the generated
             `py_library` target.
+        filegroups (dict, optional): A mapping of filegroup target names to glob patterns (or include/exclude dicts).
         srcs_exclude_glob (list, optional): A list of labels to add as `srcs` to the generated `py_library` target.
 
     Returns:
@@ -46,4 +48,5 @@ def package_annotation(
         data = data,
         data_exclude_glob = data_exclude_glob,
         srcs_exclude_glob = srcs_exclude_glob,
+        **({"filegroups": filegroups} if filegroups else {})
     ))
