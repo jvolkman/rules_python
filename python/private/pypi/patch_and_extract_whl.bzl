@@ -2,7 +2,11 @@
 
 load("//python/private:normalize_name.bzl", "normalize_name")
 load("//python/private:repo_utils.bzl", "repo_utils")
-load(":generate_whl_library_build_bazel.bzl", "generate_whl_library_build_bazel")
+load(
+    ":generate_whl_library_build_bazel.bzl",
+    "generate_wheel_files_bzl",
+    "generate_whl_library_build_bazel",
+)
 load(":patch_whl.bzl", "patch_whl")
 load(":pep508_requirement.bzl", "requirement")
 load(":pypi_repo_utils.bzl", "pypi_repo_utils")
@@ -167,6 +171,12 @@ def patch_and_extract_whl(rctx, *, whl_path, logger, sdist_filename = None):
             "extracted_files": inspection["extracted_files"],
             "shebang_scripts": inspection["shebang_scripts"],
         }
+        wheel_files_list = list(inspection["extracted_files"])
+        for s in inspection.get("shebang_scripts", []):
+            bin_s = "bin/" + s
+            if bin_s not in wheel_files_list:
+                wheel_files_list.append(bin_s)
+        rctx.file("wheel_files.bzl", generate_wheel_files_bzl(sorted(wheel_files_list)))
     else:
         whl_extract(rctx, whl_path = whl_path, logger = logger)
 

@@ -12,6 +12,7 @@ load(
     "WHEEL_FILE",
 )
 load(":namespace_pkgs.bzl", _create_inits = "create_inits")
+load(":py_wheel_extract_files.bzl", "py_wheel_extract_files", "wheel_glob")
 load(":py_wheel_library.bzl", "py_wheel_library")
 load(":venv_entry_point.bzl", "venv_entry_point")
 load(":venv_rewrite_shebang.bzl", "venv_rewrite_shebang")
@@ -33,6 +34,18 @@ DEFAULT_DATA_EXCLUDE = [
 
 _IS_VENV_SITE_PACKAGES_YES = Label("//python/config_settings:_is_venvs_site_packages_yes")
 _VENV_SITE_PACKAGES_FLAG = Label("//python/config_settings:venvs_site_packages")
+
+def _is_wheel_internal_path(src, extracted_files, shebang_scripts):
+    if src.startswith(("@", "//", ":")):
+        return False
+    if src.startswith(("site-packages/", "data/", "bin/", "include/")):
+        return True
+    if src in extracted_files:
+        return True
+    for s in shebang_scripts:
+        if src == "bin/" + s or src == "bin/" + s + ".bat":
+            return True
+    return False
 
 def whl_library_srcs(
         *,
@@ -57,6 +70,7 @@ def whl_library_srcs(
         rules = struct(
             copy_file = copy_file,
             py_library = py_library,
+            py_wheel_extract_files = py_wheel_extract_files,
             py_wheel_library = py_wheel_library,
             venv_entry_point = venv_entry_point,
             venv_rewrite_shebang = venv_rewrite_shebang,
@@ -99,11 +113,11 @@ def whl_library_srcs(
     data = [] + data
     bins_for_data_label = []
 
-    if action_install and filegroups != None:
+    if action_install and filegroups != None and not extracted_files and not shebang_scripts:
         _fail(
             (
                 "In '{}', custom glob-based 'filegroups' ({}) are not supported with experimental_action_install " +
-                "because wheel contents are extracted into the ':srcs' TreeArtifact during the build phase."
+                "unless wheel file paths are known at loading time (or use py_wheel_extract_files on downloaded wheels)."
             ).format(name, ", ".join(sorted(filegroups.keys()))),
         )
         return
@@ -119,23 +133,43 @@ def whl_library_srcs(
         bins_for_data_label.append(ep_target_name)
         data.append(ep_target_name)
 
-    for src, dest in copy_files.items():
-        rules.copy_file(
-            name = dest + ".copy",
-            src = src,
-            out = dest,
-            visibility = visibility,
-        )
-        data.append(dest)
-    for src, dest in copy_executables.items():
-        rules.copy_file(
-            name = dest + ".copy",
-            src = src,
-            out = dest,
-            is_executable = True,
-            visibility = visibility,
-        )
-        data.append(dest)
+    all_wheel_files = list(extracted_files)
+    for s in shebang_scripts:
+        bin_s = "bin/" + s
+        if bin_s not in all_wheel_files:
+            all_wheel_files.append(bin_s)
+
+    can_extract_internal = action_install and hasattr(rules, "py_wheel_extract_files")
+    wheel_install_target = "_wheel_install" if action_install else PY_SRCS_LABEL
+    extract_state = {}
+
+    for is_exec, copies in [(False, copy_files), (True, copy_executables)]:
+        for src, dest in copies.items():
+            if can_extract_internal and _is_wheel_internal_path(src, extracted_files, shebang_scripts):
+                files_for_src = all_wheel_files if src in all_wheel_files else [src]
+                copy_src = wheel_glob(
+                    [src],
+                    allow_empty = False,
+                    files = files_for_src,
+                    wheel_library = ":" + wheel_install_target,
+                    is_executable = is_exec,
+                    native = native,
+                    extract_rule = rules.py_wheel_extract_files,
+                    _state = extract_state,
+                    _fail = _fail,
+                )[0]
+            else:
+                copy_src = src
+            copy_kwargs = dict(
+                name = dest + ".copy",
+                src = copy_src,
+                out = dest,
+                visibility = visibility,
+            )
+            if is_exec:
+                copy_kwargs["is_executable"] = True
+            rules.copy_file(**copy_kwargs)
+            data.append(dest)
 
     if hasattr(native, "filegroup"):
         native.filegroup(
@@ -145,12 +179,45 @@ def whl_library_srcs(
         )
 
     if action_install:
+        if filegroups != None:
+            for fg_name, glob_spec in sorted(filegroups.items()):
+                if type(glob_spec) == "list":
+                    fg_include = glob_spec
+                    fg_exclude = []
+                else:
+                    fg_include = glob_spec.get("include", [])
+                    fg_exclude = glob_spec.get("exclude", [])
+                if hasattr(rules, "py_wheel_extract_files"):
+                    fg_srcs = wheel_glob(
+                        fg_include,
+                        exclude = fg_exclude,
+                        allow_empty = True,
+                        files = all_wheel_files,
+                        wheel_library = ":" + wheel_install_target,
+                        native = native,
+                        extract_rule = rules.py_wheel_extract_files,
+                        _state = extract_state,
+                        _fail = _fail,
+                    )
+                else:
+                    fg_srcs = []
+                if fg_name == DATA_LABEL:
+                    fg_srcs = fg_srcs + bins_for_data_label
+                if hasattr(native, "filegroup"):
+                    native.filegroup(
+                        name = fg_name,
+                        srcs = fg_srcs,
+                        visibility = visibility,
+                    )
+
         if hasattr(native, "filegroup"):
             for fg_name, fg_srcs in [
                 (EXTRACTED_WHEEL_FILES, [PY_SRCS_LABEL]),
                 (DIST_INFO_LABEL, [PY_SRCS_LABEL]),
                 (DATA_LABEL, [PY_SRCS_LABEL] + bins_for_data_label),
             ]:
+                if filegroups != None and fg_name in filegroups:
+                    continue
                 native.filegroup(
                     name = fg_name,
                     srcs = fg_srcs,
@@ -158,19 +225,34 @@ def whl_library_srcs(
                 )
 
         if hasattr(rules, "py_wheel_library"):
-            rules.py_wheel_library(
-                name = PY_SRCS_LABEL,
-                wheel = name,
+            common_wheel_kwargs = dict(
                 extracted_files = extracted_files,
                 shebang_scripts = shebang_scripts,
                 namespace_package_files = namespace_package_files,
                 srcs_exclude = srcs_exclude,
                 data_exclude = data_exclude,
                 enable_implicit_namespace_pkgs = enable_implicit_namespace_pkgs,
-                data = data,
                 tags = tags,
-                visibility = visibility,
                 experimental_venvs_site_packages = _VENV_SITE_PACKAGES_FLAG,
+            )
+
+            # NOTE: `_wheel_install` is an internal implementation detail exposed with
+            # `visibility` solely so `:wheel_files.bzl` (`wheel_glob`) can reference it
+            # when loaded from external packages. Do not depend on `:_wheel_install`
+            # directly; depend on `:srcs` (or `:pkg`) instead.
+            rules.py_wheel_library(
+                name = wheel_install_target,
+                wheel = name,
+                data = [],
+                visibility = visibility,
+                **common_wheel_kwargs
+            )
+            rules.py_wheel_library(
+                name = PY_SRCS_LABEL,
+                wheel = ":" + wheel_install_target,
+                data = data,
+                visibility = visibility,
+                **common_wheel_kwargs
             )
         return
 
@@ -204,25 +286,30 @@ def whl_library_srcs(
         )
         data.append(record_target_name)
 
+    default_filegroups = {
+        EXTRACTED_WHEEL_FILES: dict(
+            include = ["**"],
+            # The Bazel repo files are always excluded; only the sdist
+            # filename is conditional on `sdist_filename`.
+            exclude = _BAZEL_REPO_FILE_GLOBS + (
+                [sdist_filename] if sdist_filename else []
+            ),
+        ),
+        DIST_INFO_LABEL: dict(
+            include = ["site-packages/*.dist-info/**"],
+        ),
+        DATA_LABEL: dict(
+            include = ["data/**", "bin/**", "include/**"],
+        ),
+    }
     if filegroups == None:
-        filegroups = {
-            EXTRACTED_WHEEL_FILES: dict(
-                include = ["**"],
-                # The Bazel repo files are always excluded; only the sdist
-                # filename is conditional on `sdist_filename`.
-                exclude = _BAZEL_REPO_FILE_GLOBS + (
-                    [sdist_filename] if sdist_filename else []
-                ),
-            ),
-            DIST_INFO_LABEL: dict(
-                include = ["site-packages/*.dist-info/**"],
-            ),
-            DATA_LABEL: dict(
-                include = ["data/**", "bin/**", "include/**"],
-            ),
-        }
+        filegroups = default_filegroups
+    elif filegroups:
+        filegroups = default_filegroups | filegroups
 
     for filegroup_name, glob_kwargs in filegroups.items():
+        if type(glob_kwargs) == "list":
+            glob_kwargs = {"include": glob_kwargs}
         glob_kwargs = {"allow_empty": True} | glob_kwargs
         srcs = native.glob(**glob_kwargs)
         if filegroup_name == DATA_LABEL:

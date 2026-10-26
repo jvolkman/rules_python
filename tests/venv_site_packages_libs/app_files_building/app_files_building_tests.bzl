@@ -575,10 +575,10 @@ def _test_optimized_grouping_pkgutil_whls_impl(env, target):
     actual_raw_entries = target[PyInfo].venv_symlinks.to_list()
 
     actual = _venv_symlinks_from_entries(actual_raw_entries)
-    is_action_install = bool(actual) and actual[0].files == ["../+internal_dev_deps+pkgutil_nspkg1/srcs"]
-    sp_prefix = "srcs/site-packages" if is_action_install else "site-packages"
-    ns1_tree = ["../+internal_dev_deps+pkgutil_nspkg1/srcs"]
-    ns2_tree = ["../+internal_dev_deps+pkgutil_nspkg2/srcs"]
+    is_action_install = bool(actual) and actual[0].files == ["../+internal_dev_deps+pkgutil_nspkg1/_wheel_install"]
+    sp_prefix = "_wheel_install/site-packages" if is_action_install else "site-packages"
+    ns1_tree = ["../+internal_dev_deps+pkgutil_nspkg1/_wheel_install"]
+    ns2_tree = ["../+internal_dev_deps+pkgutil_nspkg2/_wheel_install"]
 
     # The important condition is that the top-level 'nspkg' directory
     # is NOT linked because it's a pkgutil namespace package.

@@ -80,9 +80,11 @@ Note: In this mode:
 - A registered Python exec-tools toolchain (`//python:exec_tools_toolchain_type`) is required, and
   `whl_library` repositories require a fetch-time Python interpreter (`python_interpreter` or
   `python_interpreter_target`) to inspect `.whl` zip archives.
-- In `pip.whl_mods`, `filegroups` is not supported, `copy_files` / `copy_executables` source keys
-  must be external labels (starting with `@` or `//`), and `additive_build_content` cannot glob or
-  directly reference extracted wheel paths (`site-packages/`, `include/`, `data/`).
+- In `pip.whl_mods`, `filegroups`, `copy_files`, and `copy_executables` extract files from downloaded
+  wheels via `py_wheel_extract_files`, and `additive_build_content` should use `wheel_glob(...)` (or
+  `load(":wheel_files.bzl", "wheel_glob")` from external `.bzl` macros), `py_wheel_headers`,
+  `py_wheel_transform`, `post_install_patches`, or `py_wheel_extract_files` instead of `native.glob(...)`
+  over extracted wheel paths (`site-packages/`, `include/`, `data/`).
 """,
     ),
     "extra_pip_args": attr.string_list(
