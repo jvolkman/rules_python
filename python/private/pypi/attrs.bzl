@@ -82,9 +82,20 @@ Note: In this mode:
   `python_interpreter_target`) to inspect `.whl` zip archives.
 - In `pip.whl_mods`, `filegroups`, `copy_files`, and `copy_executables` extract files from downloaded
   wheels via `py_wheel_extract_files`, and `additive_build_content` should use `wheel_glob(...)` (or
-  `load(":wheel_files.bzl", "wheel_glob")` from external `.bzl` macros), `py_wheel_headers`,
-  `py_wheel_transform`, `post_install_patches`, or `py_wheel_extract_files` instead of `native.glob(...)`
-  over extracted wheel paths (`site-packages/`, `include/`, `data/`).
+  `load(":wheel_files.bzl", "wheel_glob")` from external `.bzl` macros; note that `:wheel_files.bzl` is
+  generated only when `experimental_action_install` is enabled, whereas `wheel_glob(...)` inside
+  `additive_build_content` is auto-loaded in both modes), `py_wheel_headers`, `py_wheel_transform`,
+  `post_install_patches`, or `py_wheel_extract_files` instead of `native.glob(...)` over extracted wheel
+  paths (`site-packages/`, `include/`, `data/`). Note that `wheel_glob(...)` returns `:_extracted/<path>`
+  labels in action mode and `<path>` in default mode; use `py_wheel_headers` or
+  `wheel_extract_prefix() + "<path>"` rather than hardcoding `"_extracted/..."` in `includes`.
+- Source distributions (`sdist`) are inspected statically at repository fetch time and built into a
+  wheel via `py_sdist_wheel` during the build phase; `:whl` resolves to the
+  `<dist>-<ver>.sdist_build.whl` file output while `:whldir` resolves to the `.whldir` directory
+  artifact (which should be used for `py_wheel_transform`), `pip.override(patches = ...)` patches
+  apply to the unpacked sdist before building (`pre_build_patches`), and sdists installing top-level
+  compiled extension modules directly under `site-packages/` require
+  `--//python/config_settings:venvs_site_packages=no`.
 """,
     ),
     "extra_pip_args": attr.string_list(

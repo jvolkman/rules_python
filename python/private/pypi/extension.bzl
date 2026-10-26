@@ -44,6 +44,11 @@ def _whl_mods_impl(whl_mods_dict):
         # create a struct that we can pass to the _whl_mods_repo rule
         # to create the different JSON files.
         for whl_name, mods in whl_maps.items():
+            optional_fields = {}
+            for k in ("filegroups", "sdist_build_deps", "sdist_config_settings", "site_paths"):
+                val = getattr(mods, k, None)
+                if val:
+                    optional_fields[k] = val
             whl_mods[whl_name] = json.encode(struct(
                 additive_build_content = mods.build_content,
                 copy_files = mods.copy_files,
@@ -51,7 +56,7 @@ def _whl_mods_impl(whl_mods_dict):
                 data = mods.data,
                 data_exclude_glob = mods.data_exclude_glob,
                 srcs_exclude_glob = mods.srcs_exclude_glob,
-                **({"filegroups": mods.filegroups} if getattr(mods, "filegroups", None) else {})
+                **optional_fields
             ))
 
         _whl_mods_repo(
@@ -325,6 +330,9 @@ You cannot use both the additive_build_content and additive_build_content_file a
                 data = whl_mod.data,
                 data_exclude_glob = whl_mod.data_exclude_glob,
                 filegroups = whl_mod.filegroups,
+                sdist_build_deps = [str(d) for d in whl_mod.sdist_build_deps],
+                sdist_config_settings = whl_mod.sdist_config_settings,
+                site_paths = whl_mod.site_paths,
                 srcs_exclude_glob = whl_mod.srcs_exclude_glob,
             )
 
@@ -1087,6 +1095,18 @@ name in the same module for different wheels that you put in the same hub, but y
 cannot have a child module that uses the same `hub_name`.
 """,
             mandatory = True,
+        ),
+        "sdist_build_deps": attr.label_list(
+            doc = """\
+(list, optional): Explicit build dependency labels for `py_sdist_wheel` when building an sdist in an action.""",
+        ),
+        "sdist_config_settings": attr.string_dict(
+            doc = """\
+(dict, optional): PEP 517 `--config-settings` key/value pairs for `py_sdist_wheel` when building an sdist in an action.""",
+        ),
+        "site_paths": attr.string_list(
+            doc = """\
+(list, optional): Override predicted `site-packages/` paths when building an sdist in an action.""",
         ),
         "srcs_exclude_glob": attr.string_list(
             doc = """\

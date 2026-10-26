@@ -87,6 +87,91 @@ def _resolve_inspect_python(rctx, logger):
         python_interpreter_target = rctx.attr.python_interpreter_target,
     )
 
+def write_whl_library_repo(
+        rctx,
+        *,
+        name,
+        metadata,
+        sdist_filename = None,
+        annotation = None,
+        data_exclude = [],
+        namespace_package_files = [],
+        entry_points = {},
+        remove_build_files = False,
+        **action_kwargs):
+    """Write `metadata.json`, `BUILD.bazel`, and repo boilerplate for a `whl_library`.
+
+    Args:
+        rctx: The repository context.
+        name: {type}`str` Wheel filename or sdist build target name.
+        metadata: {type}`struct` Parsed package metadata (`name`, `version`, `requires_dist`, `provides_extra`).
+        sdist_filename: {type}`str | None` Optional sdist archive filename.
+        annotation: {type}`struct | None` Optional decoded package annotation struct.
+        data_exclude: {type}`list[str]` Data exclusion glob patterns.
+        namespace_package_files: {type}`list[str]` Namespace package `__init__.py` paths.
+        entry_points: {type}`dict` Parsed entry points dictionary.
+        remove_build_files: {type}`bool` Whether to delete nested `BUILD`/`BUILD.bazel` files first.
+        **action_kwargs: Extra keyword arguments forwarded to `generate_whl_library_build_bazel`.
+
+    Returns:
+        Repository metadata if `rctx.repo_metadata` is supported, otherwise `None`.
+    """
+    rctx.file("metadata.json", json.encode_indent({
+        "name": metadata.name,
+        "provides_extra": metadata.provides_extra,
+        "requires_dist": metadata.requires_dist,
+        "version": metadata.version,
+    }))
+
+    build_file_contents = generate_whl_library_build_bazel(
+        name = name,
+        dep_template = rctx.attr.dep_template,
+        sdist_filename = sdist_filename,
+        config_load = rctx.attr.config_load,
+        metadata_name = metadata.name,
+        metadata_version = metadata.version,
+        requires_dist = metadata.requires_dist,
+        # TODO @aignas 2025-05-17: maybe have a build flag for this instead
+        enable_implicit_namespace_pkgs = rctx.attr.enable_implicit_namespace_pkgs,
+        # TODO @aignas 2025-04-14: load through the hub:
+        annotation = annotation,
+        data_exclude = data_exclude,
+        group_deps = rctx.attr.group_deps,
+        group_name = rctx.attr.group_name,
+        namespace_package_files = namespace_package_files,
+        extras = requirement(rctx.attr.requirement).extras,
+        entry_points = entry_points,
+        purl = _to_purl(
+            index = rctx.attr.index_url,
+            metadata = metadata,
+            filename = sdist_filename or name,
+        ),
+        **action_kwargs
+    )
+
+    # Delete these in case the wheel had them. They generally don't cause
+    # a problem, but let's avoid the chance of that happening.
+    rctx.file("WORKSPACE")
+    rctx.file("WORKSPACE.bazel")
+    rctx.file("MODULE.bazel")
+    rctx.file("REPO.bazel", """\
+repo(
+    default_package_metadata = [
+        "//:package_metadata",
+    ],
+)
+""")
+
+    if remove_build_files:
+        # BUILD files interfere with globbing and Bazel package boundaries.
+        _remove_files(rctx, "BUILD", "BUILD.bazel")
+    rctx.file("BUILD.bazel", build_file_contents)
+
+    if hasattr(rctx, "repo_metadata"):
+        return rctx.repo_metadata(reproducible = True)
+
+    return None
+
 def patch_and_extract_whl(rctx, *, whl_path, logger, sdist_filename = None):
     """Extract the wheel, apply patches and generate BUILD.bazel files.
 
@@ -193,58 +278,16 @@ def patch_and_extract_whl(rctx, *, whl_path, logger, sdist_filename = None):
         data_exclude = rctx.attr.pip_data_exclude
         action_kwargs = {}
 
-    rctx.file("metadata.json", json.encode_indent({
-        "name": metadata.name,
-        "provides_extra": metadata.provides_extra,
-        "requires_dist": metadata.requires_dist,
-        "version": metadata.version,
-    }))
-
-    build_file_contents = generate_whl_library_build_bazel(
+    return write_whl_library_repo(
+        rctx,
         name = whl_path.basename,
-        dep_template = rctx.attr.dep_template,
+        metadata = metadata,
         sdist_filename = sdist_filename,
-        config_load = rctx.attr.config_load,
-        metadata_name = metadata.name,
-        metadata_version = metadata.version,
-        requires_dist = metadata.requires_dist,
-        # TODO @aignas 2025-05-17: maybe have a build flag for this instead
-        enable_implicit_namespace_pkgs = rctx.attr.enable_implicit_namespace_pkgs,
-        # TODO @aignas 2025-04-14: load through the hub:
         annotation = annotation,
         data_exclude = data_exclude,
-        group_deps = rctx.attr.group_deps,
-        group_name = rctx.attr.group_name,
         namespace_package_files = namespace_package_files,
-        extras = requirement(rctx.attr.requirement).extras,
         entry_points = entry_points,
-        purl = _to_purl(
-            index = rctx.attr.index_url,
-            metadata = metadata,
-            filename = sdist_filename or whl_path.basename,
-        ),
         logger = logger,
+        remove_build_files = True,
         **action_kwargs
     )
-
-    # Delete these in case the wheel had them. They generally don't cause
-    # a problem, but let's avoid the chance of that happening.
-    rctx.file("WORKSPACE")
-    rctx.file("WORKSPACE.bazel")
-    rctx.file("MODULE.bazel")
-    rctx.file("REPO.bazel", """\
-repo(
-    default_package_metadata = [
-        "//:package_metadata",
-    ],
-)
-""")
-
-    # BUILD files interfere with globbing and Bazel package boundaries.
-    _remove_files(rctx, "BUILD", "BUILD.bazel")
-    rctx.file("BUILD.bazel", build_file_contents)
-
-    if hasattr(rctx, "repo_metadata"):
-        return rctx.repo_metadata(reproducible = True)
-
-    return None
