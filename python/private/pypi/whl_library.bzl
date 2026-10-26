@@ -56,6 +56,10 @@ def whl_library(name, repo = None, **kwargs):
     kwargs.setdefault("dep_template", "@{}{{name}}//:{{target}}".format(kwargs.pop("repo_prefix", "")))
 
     if whl_file or (urls and filename and filename.endswith(".whl")):
-        whl_archive(name = name, **_filter(kwargs, whl_archive_attrs))
+        allowed_attrs = dict(whl_archive_attrs)
+        if not kwargs.get("experimental_action_install"):
+            allowed_attrs.pop("python_interpreter", None)
+            allowed_attrs.pop("python_interpreter_target", None)
+        whl_archive(name = name, **_filter(kwargs, allowed_attrs))
     else:
         pip_archive(name = name, **_filter(kwargs, pip_archive_attrs))

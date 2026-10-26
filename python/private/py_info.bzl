@@ -56,6 +56,11 @@ VenvSymlinkKind = struct(
 
 def _VenvSymlinkEntry_init(**kwargs):
     kwargs.setdefault("link_to_file", None)
+    link_to_paths = kwargs.get("link_to_paths")
+    if link_to_paths == None:
+        kwargs["link_to_paths"] = depset()
+    else:
+        _check_arg_type("link_to_paths", "depset", link_to_paths)
     return kwargs
 
 # A provider is used for memory efficiency.
@@ -95,6 +100,21 @@ A file that `venv_path` should point to. The file to link to should also be in
 A runfiles-root relative path that `venv_path` will symlink to (if
 `link_to_file` is `None`). If `None`, it means to not create it in the venv.
 """,
+        "link_to_paths": """
+:type: depset[str]
+
+:::{include} /_includes/experimental_api.md
+:::
+
+Relative file paths under `link_to_path` when the backing entry in `files` is a
+directory (`TreeArtifact`) rather than individual `File`s.
+
+This is only used when multiple targets have overlapping `venv_path` paths so
+that directory-backed entries can be merged at deeper paths.
+
+:::{versionadded} VERSION_NEXT_FEATURE
+:::
+""",
         "package": """
 :type: str | None
 
@@ -125,6 +145,13 @@ def _VenvSymlinkEntryBuilder_typedef():
     :type: DepsetBuilder[File]
     :::
 
+    :::{field} link_to_paths
+    :type: DepsetBuilder[str]
+
+    ::::{versionadded} VERSION_NEXT_FEATURE
+    ::::
+    :::
+
     :::{versionadded} 2.2.0
     :::
     """
@@ -141,6 +168,7 @@ def _VenvSymlinkEntryBuilder():
             "version": None,
         },
         files = builders.DepsetBuilder(),
+        link_to_paths = builders.DepsetBuilder(),
         get_kind = lambda: _VenvSymlinkEntryBuilder_get_kind(self),
         set_kind = lambda k: _VenvSymlinkEntryBuilder_set_kind(self, k),
         get_link_to_file = lambda: _VenvSymlinkEntryBuilder_get_link_to_file(self),
@@ -327,6 +355,7 @@ def _VenvSymlinkEntryBuilder_build(self):
         kind = self._state["kind"],
         link_to_file = self._state["link_to_file"],
         link_to_path = self._state["link_to_path"],
+        link_to_paths = self.link_to_paths.build(),
         package = self._state["package"],
         venv_path = self._state["venv_path"],
         version = self._state["version"],
@@ -459,7 +488,9 @@ program.
 
 :::{note}
 This may contain implementation-specific file types specific to a particular
-type checker.
+type checker. When `experimental_action_install` is enabled, this depset may
+also contain directory `File` objects (`TreeArtifact`s) for wheel targets that
+ship `.pyi` stubs or `py.typed` markers; consumers must handle directories.
 :::
 
 ::::{versionadded} 1.1.0
@@ -540,7 +571,9 @@ program.
 
 :::{note}
 This may contain implementation-specific file types specific to a particular
-type checker.
+type checker. When `experimental_action_install` is enabled, this depset may
+also contain directory `File` objects (`TreeArtifact`s) for wheel targets that
+ship `.pyi` stubs or `py.typed` markers; consumers must handle directories.
 :::
 
 ::::{versionadded} 1.1.0

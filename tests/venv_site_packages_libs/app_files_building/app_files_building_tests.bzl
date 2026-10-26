@@ -39,9 +39,11 @@ def _ctx(workspace_name = "_main"):
         label = Label("@@FAKE-CTX//:fake_ctx"),
     )
 
-def _file(short_path):
+def _file(short_path, is_directory = False):
     return struct(
         short_path = short_path,
+        is_directory = is_directory,
+        owner = Label("//:fake_ctx"),
     )
 
 def _venv_symlink(venv_path, *, link_to_path = None, files = []):
@@ -73,6 +75,78 @@ def _entry(venv_path, link_to_path, files, **kwargs):
         files = depset(files),
         **kwargs
     )
+
+def _assert_tree_artifact_equivalence(
+        env,
+        test_ctx,
+        files,
+        file_entries,
+        package,
+        version_str,
+        namespace_package_files = []):
+    pkg_prefix = env.ctx.label.package + "/"
+    tree_artifact = _file(pkg_prefix + "srcs", is_directory = True)
+    tree_files = [f.short_path[len(pkg_prefix):] for f in files]
+    tree_ns_files = [f.short_path[len(pkg_prefix):] for f in namespace_package_files]
+    tree_entries = get_venv_symlinks(
+        test_ctx,
+        tree_files,
+        package = package,
+        version_str = version_str,
+        site_packages_root = "site-packages",
+        namespace_package_files = tree_ns_files,
+        tree_artifact = tree_artifact,
+    )
+    file_prefix = "{}/{}site-packages/".format(test_ctx.workspace_name, pkg_prefix)
+    tree_prefix = "{}/{}srcs/site-packages/".format(test_ctx.workspace_name, pkg_prefix)
+    file_summary = sorted([
+        (
+            e.kind,
+            e.venv_path,
+            e.package,
+            e.version,
+            e.link_to_path.replace(file_prefix, tree_prefix),
+        )
+        for e in file_entries
+    ])
+    tree_summary = sorted([
+        (
+            e.kind,
+            e.venv_path,
+            e.package,
+            e.version,
+            e.link_to_path,
+        )
+        for e in tree_entries
+    ])
+    env.expect.that_collection(tree_summary).contains_exactly(file_summary)
+
+    other_entries = [
+        _entry(
+            e.venv_path,
+            "+other/site-packages/" + e.venv_path,
+            [_file("../+other/site-packages/" + e.venv_path + "/__other__.py")],
+            kind = e.kind,
+        )
+        for e in file_entries
+    ]
+    file_merged = build_link_map(test_ctx, list(file_entries) + other_entries)
+    tree_merged = build_link_map(test_ctx, list(tree_entries) + other_entries)
+    for kind, kind_map in file_merged.items():
+        expected_resolved = {}
+        for k, v in kind_map.items():
+            if type(v) == "string":
+                expected_resolved[k] = v.replace(file_prefix, tree_prefix)
+            else:
+                expected_resolved[k] = "{}/{}".format(
+                    test_ctx.workspace_name,
+                    v.short_path,
+                ).replace(file_prefix, tree_prefix)
+        actual_resolved = {
+            k: v if type(v) == "string" else "{}/{}".format(test_ctx.workspace_name, v.short_path)
+            for k, v in tree_merged[kind].items()
+        }
+        env.expect.that_dict(actual_resolved).contains_exactly(expected_resolved)
 
 def _test_conflict_merging(name):
     analysis_test(
@@ -113,6 +187,26 @@ def _test_conflict_merging_impl(env, _):
         _entry("ff/fmod.py", "+ff_b/site-packages/ff/fmod.py", [
             _file("../+ff_b/site-packages/ff/fmod.py"),
         ]),
+        # Case: two TreeArtifact distributions provide overlapping directories via link_to_paths
+        _entry(
+            "tree_a",
+            "+tree_a/srcs/site-packages/tree_a",
+            [_file("../+tree_a/srcs", is_directory = True)],
+            link_to_paths = depset(["a.txt"]),
+        ),
+        _entry(
+            "tree_a/b",
+            "+tree_a_b/srcs/site-packages/tree_a/b",
+            [_file("../+tree_a_b/srcs", is_directory = True)],
+            link_to_paths = depset(["b.txt"]),
+        ),
+        # Case: two TreeArtifact distributions provide the same pkgutil __init__.py
+        _entry("tree_ns/__init__.py", "+tree_a/srcs/site-packages/tree_ns/__init__.py", [
+            _file("../+tree_a/srcs", is_directory = True),
+        ]),
+        _entry("tree_ns/__init__.py", "+tree_b/srcs/site-packages/tree_ns/__init__.py", [
+            _file("../+tree_b/srcs", is_directory = True),
+        ]),
     ]
 
     actual, conflicts = build_link_map(_ctx(), entries, return_conflicts = True)
@@ -122,6 +216,9 @@ def _test_conflict_merging_impl(env, _):
         "a/b/b.txt": _file("../+pypi_a_b/site-packages/a/b/b.txt"),
         "duplicate/d.py": _file("../+dupe_a/site-packages/duplicate/d.py"),
         "ff/fmod.py": _file("../+ff_a/site-packages/ff/fmod.py"),
+        "tree_a/a.txt": "+tree_a/srcs/site-packages/tree_a/a.txt",
+        "tree_a/b/b.txt": "+tree_a_b/srcs/site-packages/tree_a/b/b.txt",
+        "tree_ns/__init__.py": "+tree_a/srcs/site-packages/tree_ns/__init__.py",
         "x/p/p.txt": _file("src-dev/x/p/p.txt"),
         "x/x.txt": _file("src/x/x.txt"),
     }
@@ -168,6 +265,14 @@ def _test_optimized_grouping_complex_impl(env, target):
         package = "pkg1",
         version_str = "1.0",
         site_packages_root = env.ctx.label.package + "/site-packages",
+    )
+    _assert_tree_artifact_equivalence(
+        env,
+        test_ctx,
+        target.files.to_list(),
+        entries,
+        package = "pkg1",
+        version_str = "1.0",
     )
     actual = _venv_symlinks_from_entries(entries)
 
@@ -259,6 +364,14 @@ def _test_optimized_grouping_single_toplevel_impl(env, target):
         version_str = "1.0",
         site_packages_root = env.ctx.label.package + "/site-packages",
     )
+    _assert_tree_artifact_equivalence(
+        env,
+        test_ctx,
+        target.files.to_list(),
+        entries,
+        package = "pkg2",
+        version_str = "1.0",
+    )
     actual = _venv_symlinks_from_entries(entries)
 
     rr = "{}/{}/site-packages/".format(test_ctx.workspace_name, env.ctx.label.package)
@@ -311,6 +424,14 @@ def _test_optimized_grouping_implicit_namespace_packages_impl(env, target):
         package = "pkg3",
         version_str = "1.0",
         site_packages_root = env.ctx.label.package + "/site-packages",
+    )
+    _assert_tree_artifact_equivalence(
+        env,
+        test_ctx,
+        target.files.to_list(),
+        entries,
+        package = "pkg3",
+        version_str = "1.0",
     )
     actual = _venv_symlinks_from_entries(entries)
 
@@ -380,6 +501,15 @@ def _test_optimized_grouping_pkgutil_namespace_packages_impl(env, target):
         site_packages_root = env.ctx.label.package + "/site-packages",
         namespace_package_files = ns_inits,
     )
+    _assert_tree_artifact_equivalence(
+        env,
+        test_ctx,
+        files,
+        entries,
+        package = "pkgutilns",
+        version_str = "1.0",
+        namespace_package_files = ns_inits,
+    )
     actual = _venv_symlinks_from_entries(entries)
 
     rr = "{}/{}/site-packages/".format(test_ctx.workspace_name, env.ctx.label.package)
@@ -445,6 +575,10 @@ def _test_optimized_grouping_pkgutil_whls_impl(env, target):
     actual_raw_entries = target[PyInfo].venv_symlinks.to_list()
 
     actual = _venv_symlinks_from_entries(actual_raw_entries)
+    is_action_install = bool(actual) and actual[0].files == ["../+internal_dev_deps+pkgutil_nspkg1/srcs"]
+    sp_prefix = "srcs/site-packages" if is_action_install else "site-packages"
+    ns1_tree = ["../+internal_dev_deps+pkgutil_nspkg1/srcs"]
+    ns2_tree = ["../+internal_dev_deps+pkgutil_nspkg2/srcs"]
 
     # The important condition is that the top-level 'nspkg' directory
     # is NOT linked because it's a pkgutil namespace package.
@@ -452,22 +586,22 @@ def _test_optimized_grouping_pkgutil_whls_impl(env, target):
         # Entries from pkgutil_ns1
         _venv_symlink(
             "nspkg/__init__.py",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/site-packages/nspkg/__init__.py",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/" + sp_prefix + "/nspkg/__init__.py",
+            files = ns1_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg1/site-packages/nspkg/__init__.py",
             ],
         ),
         _venv_symlink(
             "nspkg/one",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/site-packages/nspkg/one",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/" + sp_prefix + "/nspkg/one",
+            files = ns1_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg1/site-packages/nspkg/one/a.txt",
             ],
         ),
         _venv_symlink(
             "pkgutil_nspkg1-1.0.dist-info",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/site-packages/pkgutil_nspkg1-1.0.dist-info",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/" + sp_prefix + "/pkgutil_nspkg1-1.0.dist-info",
+            files = ns1_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg1/site-packages/pkgutil_nspkg1-1.0.dist-info/INSTALLER",
                 "../+internal_dev_deps+pkgutil_nspkg1/site-packages/pkgutil_nspkg1-1.0.dist-info/METADATA",
                 "../+internal_dev_deps+pkgutil_nspkg1/site-packages/pkgutil_nspkg1-1.0.dist-info/RECORD",
@@ -477,22 +611,22 @@ def _test_optimized_grouping_pkgutil_whls_impl(env, target):
         # Entries from pkgutil_ns2
         _venv_symlink(
             "nspkg/__init__.py",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/site-packages/nspkg/__init__.py",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/" + sp_prefix + "/nspkg/__init__.py",
+            files = ns2_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg2/site-packages/nspkg/__init__.py",
             ],
         ),
         _venv_symlink(
             "nspkg/two",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/site-packages/nspkg/two",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/" + sp_prefix + "/nspkg/two",
+            files = ns2_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg2/site-packages/nspkg/two/b.txt",
             ],
         ),
         _venv_symlink(
             "pkgutil_nspkg2-1.0.dist-info",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/site-packages/pkgutil_nspkg2-1.0.dist-info",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/" + sp_prefix + "/pkgutil_nspkg2-1.0.dist-info",
+            files = ns2_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg2/site-packages/pkgutil_nspkg2-1.0.dist-info/INSTALLER",
                 "../+internal_dev_deps+pkgutil_nspkg2/site-packages/pkgutil_nspkg2-1.0.dist-info/METADATA",
                 "../+internal_dev_deps+pkgutil_nspkg2/site-packages/pkgutil_nspkg2-1.0.dist-info/RECORD",
@@ -507,20 +641,26 @@ def _test_optimized_grouping_pkgutil_whls_impl(env, target):
     env.expect.that_collection(_venv_symlinks_from_entries(conflicts[0])).contains_exactly([
         _venv_symlink(
             "nspkg/__init__.py",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/site-packages/nspkg/__init__.py",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg1/" + sp_prefix + "/nspkg/__init__.py",
+            files = ns1_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg1/site-packages/nspkg/__init__.py",
             ],
         ),
         _venv_symlink(
             "nspkg/__init__.py",
-            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/site-packages/nspkg/__init__.py",
-            files = [
+            link_to_path = "+internal_dev_deps+pkgutil_nspkg2/" + sp_prefix + "/nspkg/__init__.py",
+            files = ns2_tree if is_action_install else [
                 "../+internal_dev_deps+pkgutil_nspkg2/site-packages/nspkg/__init__.py",
             ],
         ),
     ])
     env.expect.that_collection(conflicts).has_size(1)
+    if is_action_install:
+        by_venv_path = {e.venv_path: e.link_to_paths.to_list() for e in actual_raw_entries if e.venv_path in ("nspkg/one", "nspkg/two")}
+        env.expect.that_dict(by_venv_path).contains_exactly({
+            "nspkg/one": ["a.txt"],
+            "nspkg/two": ["b.txt"],
+        })
 
 def _test_package_version_filtering(name):
     analysis_test(
@@ -727,6 +867,14 @@ def _test_shared_library_symlinking_impl(env, target):
         version_str = "1.0",
         site_packages_root = env.ctx.label.package + "/site-packages",
     )
+    _assert_tree_artifact_equivalence(
+        env,
+        _ctx(),
+        srcs,
+        actual_entries,
+        package = "foo",
+        version_str = "1.0",
+    )
 
     actual = _venv_symlinks_from_entries(actual_entries)
 
@@ -755,6 +903,45 @@ def _test_shared_library_symlinking_impl(env, target):
         "foo.libs/libx.so": srcs[3],
     }
     env.expect.that_dict(actual[VenvSymlinkKind.LIB]).contains_at_least(expected_libs)
+
+def _test_default_mode_directory_merge(name):
+    analysis_test(
+        name = name,
+        impl = _test_default_mode_directory_merge_impl,
+        target = "//python:none",
+    )
+
+_tests.append(_test_default_mode_directory_merge)
+
+def _test_default_mode_directory_merge_impl(env, _):
+    test_ctx = _ctx()
+    srcs = [
+        _file("pkg/site-packages/foo/__init__.py"),
+        _file("pkg/site-packages/foo/gen_dir", is_directory = True),
+        _file("pkg/site-packages/foo/bar.py"),
+    ]
+    entries = get_venv_symlinks(
+        test_ctx,
+        srcs,
+        package = "foo",
+        version_str = "1.0",
+        site_packages_root = "pkg/site-packages",
+    )
+    env.expect.that_int(len(entries)).equals(1)
+    env.expect.that_collection(entries[0].link_to_paths.to_list()).contains_exactly([])
+
+    conflicting = _entry(
+        "foo",
+        "+other/site-packages/foo",
+        [_file("../+other/site-packages/foo/other.py")],
+    )
+    merged = build_link_map(test_ctx, list(entries) + [conflicting])
+    env.expect.that_dict(merged[VenvSymlinkKind.LIB]).contains_exactly({
+        "foo/__init__.py": srcs[0],
+        "foo/bar.py": srcs[2],
+        "foo/gen_dir": srcs[1],
+        "foo/other.py": _file("../+other/site-packages/foo/other.py"),
+    })
 
 def app_files_building_test_suite(name):
     test_suite(

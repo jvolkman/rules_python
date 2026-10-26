@@ -22,11 +22,14 @@ _RENDER = {
     "data": render.list,
     "data_exclude": render.list,
     "entry_points": render.dict_dict,
+    "extracted_files": render.list,
     "extras": render.list,
     "group_deps": render.list,
     "include": str,
+    "namespace_package_files": render.list,
     "repo": lambda maybe_label: repr(str(maybe_label)),
     "requires_dist": render.list,
+    "shebang_scripts": render.list,
     "srcs_exclude": render.list,
     "tags": render.list,
 }
@@ -52,6 +55,45 @@ package_metadata(
 )
 """
 
+_SAFE_ADDITIVE_LOAD_PREFIXES = (
+    "@rules_python//",
+    "@rules_cc//",
+    ":wheel_files.bzl",
+    "//:wheel_files.bzl",
+)
+
+def _check_additive_build_content_for_glob(content):
+    """Return True if `content` contains non-wheel `glob(` calls or external `load(`s."""
+    non_comment_lines = []
+    for raw_line in content.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if line:
+            non_comment_lines.append(line)
+    stripped = "\n".join(non_comment_lines)
+    without_wheel_glob = stripped.replace("wheel_glob(", "").replace("wheel_glob (", "")
+    if "glob(" in without_wheel_glob or "glob (" in without_wheel_glob:
+        return True
+    if "load(" not in without_wheel_glob and "load (" not in without_wheel_glob:
+        return False
+    for part in without_wheel_glob.replace("load (", "load(").split("load(")[1:]:
+        part_stripped = part.lstrip()
+        if not part_stripped or part_stripped[0] not in ('"', "'"):
+            return True
+        quote = part_stripped[0]
+        bzl_path, _, rest = part_stripped[1:].partition(quote)
+        is_safe = False
+        for prefix in _SAFE_ADDITIVE_LOAD_PREFIXES:
+            if bzl_path.startswith(prefix):
+                is_safe = True
+                break
+        if not is_safe:
+            stmt_body = rest.split(")", 1)[0]
+            if '"wheel_glob"' in stmt_body or "'wheel_glob'" in stmt_body:
+                is_safe = True
+        if not is_safe:
+            return True
+    return False
+
 def generate_whl_library_build_bazel(
         *,
         metadata_version,
@@ -59,6 +101,7 @@ def generate_whl_library_build_bazel(
         config_load,
         purl = None,
         requires_dist = [],
+        logger = None,
         **kwargs):
     """Generate a BUILD file for an unzipped Wheel
 
@@ -68,6 +111,7 @@ def generate_whl_library_build_bazel(
         config_load: {type}`str` The location from where to load the config.
         purl: The purl.
         requires_dist: {type}`list[str]` The list of dependencies from the METADATA file.
+        logger: Optional repository logger used to emit warnings.
         **kwargs: Extra args serialized to be passed to the
             {obj}`whl_library_targets`.
 
@@ -112,6 +156,19 @@ def generate_whl_library_build_bazel(
         kwargs["data_exclude"] = kwargs.get("data_exclude", []) + annotation.data_exclude_glob
         kwargs["srcs_exclude"] = annotation.srcs_exclude_glob
         if annotation.additive_build_content:
+            if (
+                kwargs.get("action_install") and
+                logger and
+                _check_additive_build_content_for_glob(annotation.additive_build_content)
+            ):
+                logger.warn(
+                    (
+                        "In '{}', annotation 'additive_build_content' may glob wheel contents; " +
+                        "globs match nothing under experimental_action_install — use wheel_glob(), " +
+                        "py_wheel_headers, py_wheel_transform, post_install_patches, or " +
+                        "py_wheel_extract_files instead."
+                    ).format(kwargs.get("name", kwargs.get("metadata_name", ""))),
+                )
             additional_content.append(annotation.additive_build_content)
 
     contents = "\n".join(

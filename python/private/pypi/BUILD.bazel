@@ -14,15 +14,54 @@
 
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("//python:py_binary.bzl", "py_binary")
+load("//python:py_library.bzl", "py_library")
 load("//python/private:distribution_filegroup.bzl", "distribution_filegroup")
+load("//python/private:py_interpreter_program.bzl", "py_interpreter_program")
 
 package(default_visibility = ["//:__subpackages__"])
 
 licenses(["notice"])
 
 exports_files(
-    srcs = ["namespace_pkg_tmpl.py"],
+    srcs = [
+        "namespace_pkg_tmpl.py",
+    ],
     visibility = ["//visibility:public"],
+)
+
+exports_files(
+    srcs = [
+        "inspect_whl.py",
+        "wheel_layout.py",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+
+py_interpreter_program(
+    name = "action_whl_installer",
+    srcs = [
+        "namespace_pkg_tmpl.py",
+        "venv_shebang_rewriter.py",
+        "wheel_layout.py",
+        "wheel_record_rewriter.py",
+    ],
+    interpreter_args = ["-B"],
+    main = "action_whl_installer.py",
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "wheel_installer_lib",
+    srcs = [
+        "action_whl_installer.py",
+        "inspect_whl.py",
+        "namespace_pkg_tmpl.py",
+        "venv_shebang_rewriter.py",
+        "wheel_layout.py",
+        "wheel_record_rewriter.py",
+    ],
+    imports = ["."],
+    visibility = ["//tests:__subpackages__"],
 )
 
 alias(
@@ -323,6 +362,7 @@ bzl_library(
     name = "pip_repository",
     srcs = ["pip_repository.bzl"],
     deps = [
+        ":attrs",
         ":parse_requirements",
         ":pep508_env",
         ":pip_repository_attrs",
@@ -581,6 +621,7 @@ bzl_library(
         ":pep508_requirement",
         ":pypi_repo_utils",
         ":whl_extract",
+        ":whl_library_srcs",
         ":whl_metadata",
         "//python/private:normalize_name",
         "//python/private:repo_utils",
@@ -600,12 +641,36 @@ bzl_library(
 )
 
 bzl_library(
+    name = "py_wheel_library",
+    srcs = ["py_wheel_library.bzl"],
+    deps = [
+        "//python/private:attr_builders",
+        "//python/private:attributes",
+        "//python/private:builders",
+        "//python/private:common",
+        "//python/private:flags",
+        "//python/private:normalize_name",
+        "//python/private:py_cc_link_params_info",
+        "//python/private:py_info",
+        "//python/private:py_interpreter_program",
+        "//python/private:py_library",
+        "//python/private:reexports",
+        "//python/private:rule_builders",
+        "//python/private:toolchain_types",
+        "//python/private:venv_runfiles",
+        "//python/private:version",
+        "@bazel_skylib//lib:paths",
+    ],
+)
+
+bzl_library(
     name = "whl_library_srcs",
     srcs = ["whl_library_srcs.bzl"],
     deps = [
         ":gen_wheel_record",
         ":labels",
         ":namespace_pkgs",
+        ":py_wheel_library",
         ":venv_entry_point",
         ":venv_rewrite_shebang",
         "//python:py_library",

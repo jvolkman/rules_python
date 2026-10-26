@@ -4,35 +4,44 @@ import os
 import sys
 
 
+def rewrite_shebang_bytes(content: bytes, target_os: str) -> bytes:
+    nl = content.find(b"\n")
+    if nl == -1:
+        first_line = content
+        rest = b""
+    else:
+        first_line = content[: nl + 1]
+        rest = content[nl + 1 :]
+
+    if target_os == "windows":
+        python_exe = (
+            b"pythonw.exe" if first_line.startswith(b"#!pythonw") else b"python.exe"
+        )
+        # A Batch-Python polyglot. Batch executes the first line and exits,
+        # while Python (via -x) ignores the first line and executes the rest.
+        header = (
+            b'@setlocal enabledelayedexpansion & "%~dp0'
+            + python_exe
+            + b'" -x "%~f0" %* & exit /b !ERRORLEVEL!\r\n'
+        )
+    else:
+        # A Shell-Python polyglot. The shell executes the triple-quoted 'exec'
+        # command, re-running the script with python3 from the scripts directory.
+        # Python ignores the triple-quoted string and continues.
+        header = (
+            b"#!/bin/sh\n'''exec' \"$(dirname \"$0\")/python3\" \"$0\" \"$@\"\n' '''\n"
+        )
+    return header + rest
+
+
 def main(argv):
     in_path, out_path, target_os = argv[1:4]
 
     with open(in_path, "rb") as in_file:
-        first_line = in_file.readline()
-        rest = in_file.read()
+        content = in_file.read()
 
     with open(out_path, "wb") as out_file:
-        if target_os == "windows":
-            python_exe = (
-                b"pythonw.exe" if first_line.startswith(b"#!pythonw") else b"python.exe"
-            )
-            # A Batch-Python polyglot. Batch executes the first line and exits,
-            # while Python (via -x) ignores the first line and executes the rest.
-            out_file.write(
-                b'@setlocal enabledelayedexpansion & "%~dp0'
-                + python_exe
-                + b'" -x "%~f0" %* & exit /b !ERRORLEVEL!\r\n',
-            )
-        else:
-            out_file.write(b"#!/bin/sh\n")
-            # A Shell-Python polyglot. The shell executes the triple-quoted 'exec'
-            # command, re-running the script with python3 from the scripts directory.
-            # Python ignores the triple-quoted string and continues.
-            out_file.write(
-                b"'''exec' \"$(dirname \"$0\")/python3\" \"$0\" \"$@\"\n' '''\n"
-            )
-
-        out_file.write(rest)
+        out_file.write(rewrite_shebang_bytes(content, target_os))
 
     mode = os.stat(out_path).st_mode
     os.chmod(out_path, mode | 0o111)

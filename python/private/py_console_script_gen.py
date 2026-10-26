@@ -96,6 +96,14 @@ def run(
         console_script_guess: The string used for guessing the console_script if it is not provided.
         shebang: The shebang to use for the entry point python file. Defaults to empty string (no shebang).
     """
+    if entry_points.is_dir():
+        candidates = sorted(
+            entry_points.glob(f"site-packages/*.dist-info/{_ENTRY_POINTS_TXT}")
+        )
+        if not candidates:
+            raise RuntimeError(f"{entry_points} does not contain {_ENTRY_POINTS_TXT}")
+        entry_points = candidates[0]
+
     config = EntryPointsParser()
     config.read(entry_points)
 
