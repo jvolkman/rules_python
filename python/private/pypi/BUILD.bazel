@@ -51,6 +51,17 @@ py_interpreter_program(
 )
 
 py_interpreter_program(
+    name = "sdist_wheel_builder",
+    srcs = [
+        "wheel_layout.py",
+        "wheel_transformer.py",
+    ],
+    interpreter_args = ["-B"],
+    main = "sdist_wheel_builder.py",
+    visibility = ["//visibility:public"],
+)
+
+py_interpreter_program(
     name = "wheel_transformer",
     srcs = [
         "wheel_layout.py",
@@ -84,6 +95,14 @@ py_library(
     ],
     imports = ["."],
     visibility = ["//tests:__subpackages__"],
+)
+
+py_library(
+    name = "sdist_wheel_builder_lib",
+    srcs = ["sdist_wheel_builder.py"],
+    imports = ["."],
+    visibility = ["//tests:__subpackages__"],
+    deps = [":wheel_installer_lib"],
 )
 
 alias(
@@ -697,6 +716,22 @@ bzl_library(
         "//python/private:attr_builders",
         "//python/private:common",
         "//python/private:py_internal",
+        "//python/private:rule_builders",
+        "//python/private:toolchain_types",
+    ],
+)
+
+bzl_library(
+    name = "py_sdist_wheel",
+    srcs = ["py_sdist_wheel.bzl"],
+    deps = [
+        ":py_installed_wheel_info",
+        "//python/private:attr_builders",
+        "//python/private:attributes",
+        "//python/private:builders",
+        "//python/private:common",
+        "//python/private:py_info",
+        "//python/private:reexports",
         "//python/private:rule_builders",
         "//python/private:toolchain_types",
     ],
