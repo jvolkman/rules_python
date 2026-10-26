@@ -3,9 +3,24 @@
 import sys
 
 
-def rewrite_record_lines(lines, target_os, data_dir_basename, rewritten_scripts):
-    data_prefix = data_dir_basename + "/"
-    quoted_data_prefix = '"' + data_prefix
+def rewrite_record_lines(
+    lines,
+    target_os,
+    data_dir_basename,
+    rewritten_scripts,
+    *,
+    wheel_dist_info_dir="",
+    target_dist_info_dir="",
+):
+    data_prefix = (data_dir_basename + "/") if data_dir_basename else ""
+    quoted_data_prefix = ('"' + data_prefix) if data_prefix else ""
+    rename_dist = (
+        wheel_dist_info_dir
+        and target_dist_info_dir
+        and wheel_dist_info_dir != target_dist_info_dir
+    )
+    dist_prefix = (wheel_dist_info_dir + "/") if rename_dist else ""
+    quoted_dist_prefix = ('"' + dist_prefix) if rename_dist else ""
 
     if target_os == "windows":
         data_repl = "../../"
@@ -24,10 +39,19 @@ def rewrite_record_lines(lines, target_os, data_dir_basename, rewritten_scripts)
     for raw_line in lines:
         line = raw_line.rstrip("\r\n")
 
-        if line.startswith(quoted_data_prefix):
+        if rename_dist and line.startswith(quoted_dist_prefix):
+            out_lines.append(
+                f'"{target_dist_info_dir}/{line[len(quoted_dist_prefix) :]}\n'
+            )
+            continue
+        if rename_dist and line.startswith(dist_prefix):
+            out_lines.append(f"{target_dist_info_dir}/{line[len(dist_prefix) :]}\n")
+            continue
+
+        if data_prefix and line.startswith(quoted_data_prefix):
             quote = '"'
             rest = line[len(quoted_data_prefix) :]
-        elif line.startswith(data_prefix):
+        elif data_prefix and line.startswith(data_prefix):
             quote = ""
             rest = line[len(data_prefix) :]
         else:

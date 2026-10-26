@@ -79,11 +79,29 @@ def _test_pyi_files_exposed_when_stubs_present(name):
             "site-packages/foo/__init__.py",
         ],
     )
+    rt_util.helper_target(
+        py_wheel_library,
+        name = name + "_sdist_site_paths",
+        wheel = name + "_whl",
+        distribution = "foo",
+        version = "1.0",
+        site_paths = ["foo"],
+    )
+    rt_util.helper_target(
+        py_wheel_library,
+        name = name + "_sdist_site_paths_with_pyi",
+        wheel = name + "_whl",
+        distribution = "foo",
+        version = "1.0",
+        site_paths = ["foo", "foo/__init__.pyi"],
+    )
     analysis_test(
         name = name,
         impl = _test_pyi_files_exposed_when_stubs_present_impl,
         targets = {
             "no_stubs": name + "_no_stubs",
+            "sdist_site_paths": name + "_sdist_site_paths",
+            "sdist_site_paths_with_pyi": name + "_sdist_site_paths_with_pyi",
             "with_py_typed": name + "_with_py_typed",
             "with_py_typed_omit": name + "_with_py_typed_omit",
             "with_pyi": name + "_with_pyi",
@@ -116,6 +134,18 @@ def _test_pyi_files_exposed_when_stubs_present_impl(env, targets):
         factory = py_info_subject,
     )
     no_stubs_info.direct_pyi_files().contains_exactly([])
+    sdist_site_paths_info = env.expect.that_target(targets.sdist_site_paths).provider(
+        PyInfo,
+        factory = py_info_subject,
+    )
+    sdist_site_paths_info.direct_pyi_files().contains_exactly([])
+    sdist_site_paths_with_pyi_info = env.expect.that_target(targets.sdist_site_paths_with_pyi).provider(
+        PyInfo,
+        factory = py_info_subject,
+    )
+    sdist_site_paths_with_pyi_info.direct_pyi_files().contains_exactly([
+        "{package}/" + targets.sdist_site_paths_with_pyi.label.name,
+    ])
 
 _tests.append(_test_pyi_files_exposed_when_stubs_present)
 
