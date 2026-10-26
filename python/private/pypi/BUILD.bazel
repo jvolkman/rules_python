@@ -31,6 +31,7 @@ exports_files(
 
 exports_files(
     srcs = [
+        "inspect_sdist.py",
         "inspect_whl.py",
         "wheel_layout.py",
     ],
@@ -85,6 +86,7 @@ py_library(
     name = "wheel_installer_lib",
     srcs = [
         "action_whl_installer.py",
+        "inspect_sdist.py",
         "inspect_whl.py",
         "namespace_pkg_tmpl.py",
         "venv_shebang_rewriter.py",
@@ -587,6 +589,10 @@ bzl_library(
     name = "whl_library_targets",
     srcs = ["whl_library_targets.bzl"],
     deps = [
+        ":env_marker_setting",
+        ":labels",
+        ":pep508_deps",
+        ":py_sdist_wheel",
         ":whl_library_deps_targets",
         ":whl_library_srcs",
     ],
@@ -619,14 +625,20 @@ bzl_library(
     deps = [
         ":attrs",
         ":deps",
+        ":generate_whl_library_build_bazel",
         ":patch_and_extract_whl",
+        ":pep508_requirement",
         ":pypi_repo_utils",
         ":urllib",
+        ":version_from_filename",
         ":whl_archive",
+        ":whl_metadata",
         "//python/private:auth",
         "//python/private:envsubst",
         "//python/private:is_standalone_interpreter",
+        "//python/private:normalize_name",
         "//python/private:repo_utils",
+        "//python/private:version",
     ],
 )
 
@@ -771,8 +783,10 @@ bzl_library(
     srcs = ["whl_library_srcs.bzl"],
     deps = [
         ":gen_wheel_record",
+        ":generate_whl_library_build_bazel",
         ":labels",
         ":namespace_pkgs",
+        ":py_sdist_wheel",
         ":py_wheel_extract_files",
         ":py_wheel_library",
         ":venv_entry_point",

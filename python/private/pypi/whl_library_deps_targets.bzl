@@ -151,6 +151,9 @@ def whl_library_deps_targets(
     if hasattr(native, "filegroup"):
         # We include the whl file as srcs so that `$(location :whl)` expands to the whl file.
         # The transitive dependencies are available via the `data` attribute.
+        # Note: For action-built sdists (`experimental_action_install`), `:whl`'s contents are
+        # the built wheel; the filename (`<dist>-<ver>.sdist_build.whl`) is not a valid wheel
+        # filename — use `:whldir` for the real one.
         native.filegroup(
             name = whl_file_label,
             srcs = [repo_label(WHEEL_FILE)],
@@ -197,29 +200,48 @@ def _parse_requires_dist(
         extras = extras,
     )
 
-def _config_settings(dependencies_with_markers, rules, **kwargs):
+def config_settings(
+        dependencies_with_markers,
+        rules = struct(env_marker_setting = env_marker_setting),
+        setting_prefix = "include_",
+        visibility = ["//visibility:private"]):
     """Generate config settings for the targets.
 
     Args:
         dependencies_with_markers: {type}`dict[str, str]` The markers to evaluate by
             each dep.
         rules: used for testing
-        **kwargs: Extra kwargs to pass to the rule.
+        setting_prefix: {type}`str` Target name prefix for the generated setting.
+        visibility: {type}`list[str]` Target visibility.
     """
     for dep, expression in dependencies_with_markers.items():
         rules.env_marker_setting(
-            name = "include_{}".format(dep),
+            name = "{}{}".format(setting_prefix, dep),
             expression = expression,
-            **kwargs
+            visibility = visibility,
         )
 
-def _deps(deps, package_deps, tmpl):
+def select_deps(deps, package_deps, tmpl, setting_prefix = "include_"):
+    """Append unconditional and marker-selected dependencies to `deps`.
+
+    Args:
+        deps: {type}`list[str]` Initial dependency list.
+        package_deps: {type}`struct` Parsed dependency struct (`deps` and `deps_select`).
+        tmpl: {type}`str` Format string template for dependency labels.
+        setting_prefix: {type}`str` Prefix for marker config_setting target names.
+
+    Returns:
+        {type}`list[str] | select` Combined dependencies list/select expression.
+    """
     deps = [] + deps + [tmpl.format(d) for d in sorted(package_deps.deps)]
 
     for dep in package_deps.deps_select:
         deps = deps + select({
-            ":is_include_{}_true".format(dep): [tmpl.format(dep)],
+            ":is_{}{}_true".format(setting_prefix, dep): [tmpl.format(dep)],
             "//conditions:default": [],
         })
 
     return deps
+
+_config_settings = config_settings
+_deps = select_deps
