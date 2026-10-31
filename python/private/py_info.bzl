@@ -516,7 +516,9 @@ program.
 
 :::{note}
 This may contain implementation-specific file types specific to a particular
-type checker.
+type checker. When `experimental_action_install` is enabled, this depset may
+also contain directory `File` objects (`TreeArtifact`s) for wheel targets that
+ship `.pyi` stubs or `py.typed` markers; consumers must handle directories.
 :::
 
 ::::{versionadded} 1.1.0
@@ -597,7 +599,9 @@ program.
 
 :::{note}
 This may contain implementation-specific file types specific to a particular
-type checker.
+type checker. When `experimental_action_install` is enabled, this depset may
+also contain directory `File` objects (`TreeArtifact`s) for wheel targets that
+ship `.pyi` stubs or `py.typed` markers; consumers must handle directories.
 :::
 
 ::::{versionadded} 1.1.0
