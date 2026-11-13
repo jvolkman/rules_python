@@ -18,6 +18,7 @@ load("@bazel_skylib//lib:sets.bzl", "sets")
 load("//python/private:normalize_name.bzl", "normalize_name")
 load("//python/private:repo_utils.bzl", "REPO_DEBUG_ENV_VAR", "repo_utils")
 load("//python/private:text_util.bzl", "render")
+load(":attrs.bzl", "use_action_install")
 load(":parse_requirements.bzl", "host_platform", "parse_requirements", "select_requirement")
 load(":pep508_env.bzl", "env")
 load(":pip_repository_attrs.bzl", "ATTRS")
@@ -211,6 +212,9 @@ def _pip_repository_impl(rctx):
     if rctx.attr.python_interpreter_target:
         config["python_interpreter_target"] = str(rctx.attr.python_interpreter_target)
 
+    if use_action_install(rctx, rctx.attr):
+        config["experimental_action_install"] = True
+
     macro_tmpl = "@%s//{}:{}" % rctx.attr.name
 
     aliases = render_pkg_aliases(
@@ -315,7 +319,8 @@ You can then reference installed dependencies from a `BUILD` file with the alias
 - `@pypi//pyyaml` and `@pypi//pyyaml:pkg` both point to the `py_library`
   created after extracting the `PyYAML` package.
 - `@pypi//pyyaml:data` points to the extra data included in the package.
-- `@pypi//pyyaml:dist_info` points to the `dist-info` files in the package.
+- `@pypi//pyyaml:dist_info` points to the `dist-info` files in the package (or
+  only `entry_points.txt` when `experimental_action_install` is enabled).
 - `@pypi//pyyaml:whl` points to the wheel file that was extracted.
 
 ```starlark
@@ -373,6 +378,7 @@ See the example in rules_python/examples/pip_parse_vendored.
 """,
     implementation = _pip_repository_impl,
     environ = [
+        "RULES_PYTHON_EXPERIMENTAL_ACTION_INSTALL",
         "RULES_PYTHON_PIP_ISOLATED",
         REPO_DEBUG_ENV_VAR,
     ],
